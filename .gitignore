@@ -2,6 +2,7 @@
 __pycache__/
 logs/
 data/
+venv/
 *.py[cod]
 *.pt
 *.arff
@@ -9,4 +10,3 @@ data/
 *.pkl
 *.pickle
 *.xlsx
-venv/

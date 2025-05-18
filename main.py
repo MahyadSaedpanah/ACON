@@ -20,7 +20,7 @@ parser.add_argument('--run_description', default='ACON', type=str, help='name of
 parser.add_argument('--da_method', default='ACON', type=str)
 
 # ========= Select the DATASET ==============
-parser.add_argument('--data_path', default='/data', type=str, help='Path containing dataset')
+parser.add_argument('--data_path', default='/home/mahyad/projects/ACON/data', type=str, help='Path containing dataset')
 parser.add_argument('--dataset', default='UCIHAR',type=str)
 
 # ========= Select the BACKBONE ==============
@@ -28,7 +28,7 @@ parser.add_argument('--backbone', default='CNN', type=str)
 
 # ========= Experiment settings ===============
 parser.add_argument('--num_runs', default=5, type=int, help='Number of consecutive run with different seeds')
-parser.add_argument('--device', default='cuda', type=str, help='cpu or cuda')
+parser.add_argument('--device', default='cpu', type=str, help='cpu or cuda')
 parser.add_argument('--num_epochs', type=int, default=50)
 parser.add_argument('--bs', type=int, default=32, help='batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='optimizer learning rate')
