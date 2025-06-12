@@ -4,7 +4,7 @@ python main.py \
  --run_description EMG \
  --da_method ACON \
  --dataset EMG \
- --num_runs 5 \
+ --num_runs 1 \
  --lr 0.001 \
  --cls_trade_off 1 \
  --domain_trade_off 1 \
