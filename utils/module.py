@@ -1,6 +1,6 @@
 """
-@author: Mingyang Liu
-@contact: mingyang1024@gmail.com
+@author: Mingyang Liu , Mahyad Saedpanah
+@contact: mingyang1024@gmail.com , saedpanahmahyad@gmail.com
 """
 
 import torch
@@ -151,3 +151,36 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+
+
+class CrossAttentionGate(nn.Module):
+    """
+    A lightweight cross-attention gate that refines one feature vector (query)
+    using another (key/value), with a residual connection.
+    """
+    def __init__(self, dim_q, dim_kv, dim_out, dim_k=None):
+        super().__init__()
+        dim_k = dim_k or dim_out
+        # learnable projections
+        self.q_proj   = nn.Linear(dim_q,  dim_k, bias=True)
+        self.k_proj   = nn.Linear(dim_kv, dim_k, bias=True)
+        self.v_proj   = nn.Linear(dim_kv, dim_k, bias=True)
+        # project back to query space
+        self.out_proj = nn.Linear(dim_k,  dim_out, bias=True)
+        self.scale    = dim_k ** -0.5
+
+    def forward(self, query: torch.Tensor, keyval: torch.Tensor) -> torch.Tensor:
+        # query: (B, dim_q), keyval: (B, dim_kv)
+        Q = self.q_proj(query)       # (B, dim_k)
+        K = self.k_proj(keyval)      # (B, dim_k)
+        V = self.v_proj(keyval)      # (B, dim_k)
+
+        # scaled dot-product attention score (B,1)
+        scores = (Q * K).sum(dim=-1, keepdim=True) * self.scale
+        weights = torch.softmax(scores, dim=-1)   # (B,1)
+
+        # weight the values
+        attn_out = weights * V                 # broadcast → (B, dim_k)
+        # project back + residual
+        out = self.out_proj(attn_out) + query  # (B, dim_out)
+        return out
