@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
+from utils.module import FrequencyAttention
 
 
     
@@ -37,13 +38,24 @@ class ACON(Algorithm):
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
+        self.freq_attention = FrequencyAttention(
+            in_dim=self.fft_mode * configs.input_channels,
+            num_freqs=configs.avg_mode,   # همان num_freqs که با avg_pooling استفاده می‌شود
+            hidden_dim=64
+        ).to(device)
+
+        # Optimizer ماژول attention (در کنار سایر optimizerها):
+        self.attn_optimizer = torch.optim.Adam(
+            self.freq_attention.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
 
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
-            {'params': self.f_classifier.parameters()}],
+            {'params': self.f_classifier.parameters()},
+            {'params': self.freq_attention.parameters()}],
             lr=args.lr,
             weight_decay=args.weight_decay
         )
@@ -114,8 +126,15 @@ class ACON(Algorithm):
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
 
         
-        src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
-        trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
+        # src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
+        # trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
+
+        src_attn_input = src_f_feat.abs().mean(dim=2).reshape(src_f_feat.size(0), -1)  # [B, F]
+        trg_attn_input = trg_f_feat.abs().mean(dim=2).reshape(trg_f_feat.size(0), -1)
+
+        src_a_disc = self.freq_attention(src_attn_input)  # [B, avg_mode]
+        trg_a_disc = self.freq_attention(trg_attn_input)
+
 
 
 
@@ -155,11 +174,19 @@ class ACON(Algorithm):
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
 
+        # Compute class-discriminability loss (supervised only on source)
+        src_probs = F.log_softmax(src_t_pred, dim=1)  # [B, num_classes]
+        one_hot = F.one_hot(src_y, num_classes=src_probs.size(1)).float()
+        logp = (src_probs * one_hot).sum(dim=1)  # log p(y|x)
+        LA = - (src_a_disc * logp.unsqueeze(1)).sum() / src_a_disc.size(0)  # weighted negative log-likelihood
+
+
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
                + self.args.domain_trade_off * domain_loss \
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
                + self.args.align_t_trade_off * align_t_tf_loss \
                + self.args.align_s_trade_off * align_s_tf_loss \
+               + self.args.attn_trade_off * LA  # new - LA
 
 
         # update feature extractor
@@ -174,7 +201,8 @@ class ACON(Algorithm):
                 'align target tf loss': align_t_tf_loss.item(),
                 'cond_ent_loss_t': entropy_trg_t.item(),
                 'cond_ent_loss_f': entropy_trg_f.item(),
-                'domain acc': domain_acc.item()}
+                'domain acc': domain_acc.item(),
+                'LA': LA.item()}
     
     '''return predictions'''
     def predict(self, data):
