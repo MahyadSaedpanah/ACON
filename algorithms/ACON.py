@@ -129,8 +129,8 @@ class ACON(Algorithm):
         # src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
         # trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
 
-        src_attn_input = src_f_feat.abs().mean(dim=2).reshape(src_f_feat.size(0), -1)  # [B, F]
-        trg_attn_input = trg_f_feat.abs().mean(dim=2).reshape(trg_f_feat.size(0), -1)
+        src_attn_input = src_f_feat.detach()  # [B, F]
+        trg_attn_input = trg_f_feat.detach()
 
         src_a_disc = self.freq_attention(src_attn_input)  # [B, avg_mode]
         trg_a_disc = self.freq_attention(trg_attn_input)
