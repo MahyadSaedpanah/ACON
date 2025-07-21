@@ -51,7 +51,7 @@ parser.add_argument('--domain_trade_off', type=float,default=1.0)
 parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
-parser.add_argument('--attn_loss_trade_off', type=float, default=0.1, help='Weight for attention loss')
+parser.add_argument('--attn_loss_trade_off', type=float, default=1, help='Weight for attention loss')
 
 
 # ========= Debug Mode ===============
