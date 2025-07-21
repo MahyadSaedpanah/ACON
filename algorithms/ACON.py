@@ -214,6 +214,7 @@ class ACON(Algorithm):
             'domain_classifier':self.domain_classifier.state_dict(),
             'f_encoder':self.f_feature_extractor.state_dict(),
             'f_classifier':self.f_classifier.state_dict(),
+            'att_module': self.att_module.state_dict(),
         }, path)
 
     def load_model(self, path):
@@ -222,6 +223,7 @@ class ACON(Algorithm):
         self.t_classifier.load_state_dict(checkpoint['t_classifier'])
         self.f_feature_extractor.load_state_dict(checkpoint['f_encoder'])
         self.f_classifier.load_state_dict(checkpoint['f_classifier'])
+        self.att_module.load_state_dict(checkpoint['att_module'])
 
     def get_domain_acc(self, pred, label):
         pred = torch.argmax(pred, dim=1)
