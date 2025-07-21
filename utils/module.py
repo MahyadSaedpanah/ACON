@@ -151,3 +151,25 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+    
+class FrequencyAttention(nn.Module):
+    """
+    Adaptive attention module to assign importance weights to each frequency component.
+    Input shape: (B, D) where D = num_freqs (amplitude vector)
+    Output shape: (B, D) attention weights (summing to 1 over frequencies)
+    """
+    def __init__(self, in_dim, hidden_dim, num_freqs):
+        super(FrequencyAttention, self).__init__()
+        self.att_net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_freqs),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, vi_amp):
+        """
+        param vi_amp: amplitude features (B, D)
+        return: attention weights (B, D)
+        """
+        return self.att_net(vi_amp)
