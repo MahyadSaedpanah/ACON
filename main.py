@@ -51,6 +51,7 @@ parser.add_argument('--domain_trade_off', type=float,default=1.0)
 parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
+parser.add_argument('--attn_trade_off', type=float, default=0.5)
 
 # ========= Debug Mode ===============
 parser.add_argument('--debug', action='store_true', help='Run in debug mode (lightweight settings)')

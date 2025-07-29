@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
+from utils.module import FrequencyAttention
 
 
     
@@ -35,6 +36,11 @@ class ACON(Algorithm):
         self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
+        self.attention = FrequencyAttention(
+            input_dim=self.fft_mode * configs.input_channels,
+            hidden_dim=128
+        ).to(self.device)
+
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
 
@@ -43,7 +49,8 @@ class ACON(Algorithm):
             {'params': self.t_feature_extractor.parameters()},
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
-            {'params': self.f_classifier.parameters()}],
+            {'params': self.f_classifier.parameters()},
+            {'params': self.attention.parameters()}],
             lr=args.lr,
             weight_decay=args.weight_decay
         )
@@ -109,6 +116,15 @@ class ACON(Algorithm):
         src_f_feat = self.f_feature_extractor(self.period_data(src_x,self.period))
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x,self.period))
         src_a_cls, src_a_disc = self.get_amplitude(src_f_feat)
+        # تولید وزن attention
+        attn_weights = self.attention(src_a_cls.detach())  # [B, freq_dim]
+
+        # وزن‌دهی به ویژگی‌های فرکانس
+        src_f_feat_input = attn_weights * src_a_cls
+
+        # عبور از طبقه‌بند فرکانس
+        src_f_pred, src_f_feat = self.f_classifier(src_f_feat_input, True)
+
         trg_a_cls, trg_a_disc = self.get_amplitude(trg_f_feat)
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
@@ -155,11 +171,16 @@ class ACON(Algorithm):
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
 
+        src_probs = F.log_softmax(src_f_pred, dim=1)
+        src_labels_onehot = F.one_hot(src_y, num_classes=src_probs.size(1)).float()
+        loss_attention = -torch.sum(attn_weights * torch.sum(src_probs * src_labels_onehot, dim=1, keepdim=True)) / src_y.size(0)
+
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
                + self.args.domain_trade_off * domain_loss \
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
                + self.args.align_t_trade_off * align_t_tf_loss \
                + self.args.align_s_trade_off * align_s_tf_loss \
+               + self.args.attn_trade_off * loss_attention \
 
 
         # update feature extractor
@@ -194,6 +215,7 @@ class ACON(Algorithm):
             'domain_classifier':self.domain_classifier.state_dict(),
             'f_encoder':self.f_feature_extractor.state_dict(),
             'f_classifier':self.f_classifier.state_dict(),
+            'attention': self.attention.state_dict(),
         }, path)
 
     def load_model(self, path):
@@ -202,6 +224,7 @@ class ACON(Algorithm):
         self.t_classifier.load_state_dict(checkpoint['t_classifier'])
         self.f_feature_extractor.load_state_dict(checkpoint['f_encoder'])
         self.f_classifier.load_state_dict(checkpoint['f_classifier'])
+        self.attention.load_state_dict(checkpoint['attention'])
 
     def get_domain_acc(self, pred, label):
         pred = torch.argmax(pred, dim=1)

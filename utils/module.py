@@ -151,3 +151,15 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+    
+
+class FrequencyAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(FrequencyAttention, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return F.softmax(x, dim=-1) 
