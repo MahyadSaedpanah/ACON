@@ -30,19 +30,21 @@ class ACON(Algorithm):
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
 
+
         # model
+        # print(f"[CHECK] fft_mode: {self.fft_mode}, period: {self.period}, sequence_len: {configs.sequence_len}")
         self.t_feature_extractor = CNN(configs)
         self.t_classifier = TemporalClassifierHead(self.t_feature_extractor.out_dim, configs.num_classes)
-        self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
+        self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
 
         # attention module for adaptive frequency selection
         self.attn_module = FrequencyAttention(
-            input_dim=configs.input_channels * self.fft_mode,
+            input_dim=self.fft_mode * configs.input_channels,   # = 99
             hidden_dim=128,
-            num_freqs=self.fft_mode
+            num_freqs=self.fft_mode * configs.input_channels    # = 99
         ).to(self.device)
         
 
@@ -51,7 +53,8 @@ class ACON(Algorithm):
             {'params': self.t_feature_extractor.parameters()},
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
-            {'params': self.f_classifier.parameters()}],
+            {'params': self.f_classifier.parameters()},
+            {'params': self.attn_module.parameters()}],
             lr=args.lr,
             weight_decay=args.weight_decay
         )
@@ -83,59 +86,64 @@ class ACON(Algorithm):
         return out
 
     def get_amplitude(self, x_fft):
-        a = x_fft.abs()
+        a = x_fft.abs()  # [B, C, Np, F] → بعد از mean میشه [B, C, F]
         if a.dim() == 4:
-            a = a.mean(dim=2)
+            a = a.mean(dim=2)  # mean over periods → [B, C, fft_mode]
+
         a_disc = a[:, :, :self.fft_mode]
         a_disc = self.avg_pooling(a_disc.mean(dim=1)).softmax(-1)
-        a_cls = a[:, :, :self.fft_mode]
-        a_cls = a_cls.reshape(a_cls.size(0), -1)
+
+        a_cls = a[:, :, :self.fft_mode]           # [B, C, fft_mode]
+        a_cls = a_cls.reshape(a_cls.size(0), -1)  # → [B, C × fft_mode]
         return a_cls, a_disc
     
     
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
 
-        # prepare true domain labels
+        # Domain labels
         domain_label_src = torch.ones(len(src_x)).to(self.device)
         domain_label_trg = torch.zeros(len(trg_x)).to(self.device)
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0).long()
 
-        # source features and predictions
+        # Temporal features and predictions
         src_t_feat = self.t_feature_extractor(src_x)
         src_t_pred = self.t_classifier(src_t_feat)
-
-        # target features and predictions
         trg_t_feat = self.t_feature_extractor(trg_x)
         trg_t_pred = self.t_classifier(trg_t_feat)
 
-        # concatenate features
-        feat_concat = torch.cat((src_t_feat, trg_t_feat), dim=0)
-
-        
-        
-        src_f_feat = self.f_feature_extractor(self.period_data(src_x,self.period))
-        trg_f_feat = self.f_feature_extractor(self.period_data(trg_x,self.period))
+        # Frequency features
+        src_f_feat = self.f_feature_extractor(self.period_data(src_x, self.period))
+        trg_f_feat = self.f_feature_extractor(self.period_data(trg_x, self.period))
         src_a_cls, src_a_disc = self.get_amplitude(src_f_feat)
         trg_a_cls, trg_a_disc = self.get_amplitude(trg_f_feat)
-        # compute adaptive frequency weights using attention module
+
+        # Adaptive frequency attention
         src_freq_weights = self.attn_module(src_a_cls.detach())  # [B, fft_mode]
-        src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
-        log_probs = F.log_softmax(src_f_pred, dim=1)                # [B, num_classes]
-        target_onehot = F.one_hot(src_y, num_classes=log_probs.size(1)).float()  # [B, num_classes]
+        trg_freq_weights = self.attn_module(trg_a_cls.detach())  # [B, fft_mode]
+
+        # Apply weights to amplitude
+        weighted_src_a_cls = src_freq_weights * src_a_cls
+        weighted_trg_a_cls = trg_freq_weights * trg_a_cls
+
+        # Predict with weighted amplitudes
+        src_f_pred, src_f_feat = self.f_classifier(weighted_src_a_cls, True)
+        trg_f_pred, trg_f_feat = self.f_classifier(weighted_trg_a_cls, True)
+
+        # Compute attention loss L_A
+        log_probs = F.log_softmax(src_f_pred, dim=1)
+        target_onehot = F.one_hot(src_y, num_classes=log_probs.size(1)).float()
         weighted_logp = (log_probs * target_onehot).sum(dim=1)      # [B]
         mean_attention = src_freq_weights.mean(dim=1)               # [B]
         L_A = -torch.mean(mean_attention * weighted_logp)           # scalar loss
 
-        trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
-
-        
+        # Disc features (domain discriminator part)
         src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
         trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
-
-
-
         ft_a_concat = torch.cat([src_a_disc, trg_a_disc], dim=0)
+
+        feat_concat = torch.cat((src_t_feat, trg_t_feat), dim=0)
+
 
         # Domain classification loss
         feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1).detach()

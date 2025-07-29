@@ -136,8 +136,10 @@ class FrequencyEncoder(nn.Module):
             return torch.einsum("bixy,ioy->boxy", input, weights)
 
     def forward(self, x):
+        # print(f"[DEBUG] x_ft shape: {x.shape}, mode: {self.mode}, weights1 shape: {self.weights1.shape}")
         batchsize = x.size(0)
         x_ft = torch.fft.rfft(x,norm='ortho', dim=-1)
+        # print(f"[DEBUG] x_ft after rfft: {x_ft.shape}")
         
         if self.normalize:
             x_ft = F.normalize(x_ft, dim=-1)
