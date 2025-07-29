@@ -151,3 +151,25 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+
+
+class FrequencyAttentionModule(nn.Module):
+    """
+    Attention module for frequency selection.
+    """
+    def __init__(self, input_dim, hidden_dim=128):
+        super(FrequencyAttentionModule, self).__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+        )
+
+    def forward(self, amp_feat):
+        """
+        amp_feat: Tensor of shape [B, D] (amplitude features from FFT)
+        returns: Tensor of shape [B, D] (softmax attention weights)
+        """
+        scores = self.attention(amp_feat)         # [B, D]
+        weights = F.softmax(scores, dim=-1)       # [B, D]
+        return weights

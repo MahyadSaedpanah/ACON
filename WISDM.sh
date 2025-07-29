@@ -1,14 +1,14 @@
-
+ 
 python main.py \
  --experiment_description ACON \
- --run_description EMG \
+ --run_description WISDM \
  --da_method ACON \
- --dataset EMG \
+ --dataset WISDM \
  --num_runs 5 \
- --lr 0.001 \
+ --lr 0.003 \
  --cls_trade_off 1 \
  --domain_trade_off 1 \
  --entropy_trade_off 0.01 \
  --align_t_trade_off 1 \
- --align_s_trade_off 1\
- --debug
+ --align_s_trade_off 1 \
+ --attn_trade_off 1.0 \
