@@ -118,7 +118,15 @@ class ACON(Algorithm):
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x,self.period))
         src_a_cls, src_a_disc = self.get_amplitude(src_f_feat)
         trg_a_cls, trg_a_disc = self.get_amplitude(trg_f_feat)
+        # compute adaptive frequency weights using attention module
+        src_freq_weights = self.attn_module(src_a_cls.detach())  # [B, fft_mode]
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
+        log_probs = F.log_softmax(src_f_pred, dim=1)                # [B, num_classes]
+        target_onehot = F.one_hot(src_y, num_classes=log_probs.size(1)).float()  # [B, num_classes]
+        weighted_logp = (log_probs * target_onehot).sum(dim=1)      # [B]
+        mean_attention = src_freq_weights.mean(dim=1)               # [B]
+        L_A = -torch.mean(mean_attention * weighted_logp)           # scalar loss
+
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
 
         
@@ -168,6 +176,8 @@ class ACON(Algorithm):
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
                + self.args.align_t_trade_off * align_t_tf_loss \
                + self.args.align_s_trade_off * align_s_tf_loss \
+               + self.args.attn_trade_off * L_A        # L_A term
+
 
 
         # update feature extractor
@@ -202,6 +212,8 @@ class ACON(Algorithm):
             'domain_classifier':self.domain_classifier.state_dict(),
             'f_encoder':self.f_feature_extractor.state_dict(),
             'f_classifier':self.f_classifier.state_dict(),
+            'attn_module': self.attn_module.state_dict()  # attention
+
         }, path)
 
     def load_model(self, path):
@@ -210,6 +222,8 @@ class ACON(Algorithm):
         self.t_classifier.load_state_dict(checkpoint['t_classifier'])
         self.f_feature_extractor.load_state_dict(checkpoint['f_encoder'])
         self.f_classifier.load_state_dict(checkpoint['f_classifier'])
+        self.attn_module.load_state_dict(checkpoint['attn_module'])  # attention
+
 
     def get_domain_acc(self, pred, label):
         pred = torch.argmax(pred, dim=1)
