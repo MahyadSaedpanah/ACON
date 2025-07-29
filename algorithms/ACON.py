@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
+from utils.module import FrequencyAttention
 
 
     
@@ -36,6 +37,13 @@ class ACON(Algorithm):
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+
+        # attention module for adaptive frequency selection
+        self.attn_module = FrequencyAttention(
+            input_dim=configs.input_channels * self.fft_mode,
+            hidden_dim=128,
+            num_freqs=self.fft_mode
+        ).to(self.device)
         
 
         # optimizers

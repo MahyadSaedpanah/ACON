@@ -151,3 +151,17 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+    
+class FrequencyAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_freqs):
+        super().__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_freqs),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, v_amp):
+        # v_amp: [B, D] = flatten amplitude spectrum per sample
+        return self.attn(v_amp)
