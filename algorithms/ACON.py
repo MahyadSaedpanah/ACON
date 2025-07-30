@@ -195,7 +195,8 @@ class ACON(Algorithm):
                 'align target tf loss': align_t_tf_loss.item(),
                 'cond_ent_loss_t': entropy_trg_t.item(),
                 'cond_ent_loss_f': entropy_trg_f.item(),
-                'domain acc': domain_acc.item()}
+                'domain acc': domain_acc.item(),
+                'attn_loss': loss_attention.item()}
     
     '''return predictions'''
     def predict(self, data):
