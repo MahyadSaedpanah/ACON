@@ -116,13 +116,9 @@ class ACON(Algorithm):
         src_f_feat = self.f_feature_extractor(self.period_data(src_x,self.period))
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x,self.period))
         src_a_cls, src_a_disc = self.get_amplitude(src_f_feat)
-        # تولید وزن attention
+        # Attention after (src_a_cls)
         attn_weights = self.attention(src_a_cls.detach())  # [B, freq_dim]
-
-        # وزن‌دهی به ویژگی‌های فرکانس
         src_f_feat_input = attn_weights * src_a_cls
-
-        # عبور از طبقه‌بند فرکانس
         src_f_pred, src_f_feat = self.f_classifier(src_f_feat_input, True)
 
         trg_a_cls, trg_a_disc = self.get_amplitude(trg_f_feat)
@@ -171,10 +167,12 @@ class ACON(Algorithm):
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
 
+        # Attention loss
         src_probs = F.log_softmax(src_f_pred, dim=1)
         src_labels_onehot = F.one_hot(src_y, num_classes=src_probs.size(1)).float()
         loss_attention = -torch.sum(attn_weights * torch.sum(src_probs * src_labels_onehot, dim=1, keepdim=True)) / src_y.size(0)
 
+        # Total loss
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
                + self.args.domain_trade_off * domain_loss \
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
