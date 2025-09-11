@@ -163,3 +163,38 @@ class FrequencyAttention(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.softmax(x, dim=-1) 
+
+
+class GraphCorrelation(nn.Module):
+    def __init__(self, t_dim, f_dim, hidden_dim=128, out_dim=128):
+        super(GraphCorrelation, self).__init__()
+        self.proj_t = nn.Linear(t_dim, hidden_dim)
+        self.proj_f = nn.Linear(f_dim, hidden_dim)
+        self.edge_mlp = nn.Linear(2*hidden_dim, 1)
+        self.gcn = nn.Linear(hidden_dim, out_dim)
+        self.out_dim = out_dim
+
+
+    def forward(self, t_feat, f_feat):
+        # t_feat: [B, d_t], f_feat: [B, d_f]
+        vt = self.proj_t(t_feat)  # [B, hidden_dim]
+        vf = self.proj_f(f_feat)  # [B, hidden_dim]
+
+        V = torch.stack([vt, vf], dim=1)  # [B, 2, hidden_dim]
+
+        # adjacency
+        B = V.size(0)
+        adj = torch.zeros(B, 2, 2, device=V.device)
+        for i in range(2):
+            for j in range(2):
+                e = torch.cat([V[:, i, :], V[:, j, :]], dim=1)  # [B, 2*hidden_dim]
+                adj[:, i, j] = torch.sigmoid(self.edge_mlp(e)).squeeze()
+
+        # message passing
+        H = torch.bmm(adj, V)  # [B, 2, hidden_dim]
+        H = torch.relu(self.gcn(H))  # [B, 2, out_dim]
+
+        # readout: میانگین نودها
+        h = H.mean(dim=1)  # [B, out_dim]
+        return h
+

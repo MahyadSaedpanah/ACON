@@ -10,6 +10,7 @@ from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
 from utils.module import FrequencyAttention
+from utils.module import GraphCorrelation
 
 
     
@@ -33,7 +34,15 @@ class ACON(Algorithm):
         # model
         self.t_feature_extractor = CNN(configs)
         self.t_classifier = TemporalClassifierHead(self.t_feature_extractor.out_dim, configs.num_classes)
-        self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
+        # self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
+        self.graph_corr = GraphCorrelation(
+            t_dim=self.t_feature_extractor.out_dim,
+            f_dim=configs.avg_mode,
+            hidden_dim=128,
+            out_dim=self.t_feature_extractor.out_dim
+        ).to(self.device)
+        self.domain_classifier = Discriminator(self.graph_corr.out_dim, self.args.disc_hid_dim)
+
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
         self.attention = FrequencyAttention(
@@ -42,6 +51,9 @@ class ACON(Algorithm):
         ).to(self.device)
 
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+        print("t_dim =", self.t_feature_extractor.out_dim)
+        print("f_dim =", configs.avg_mode)
+
         
 
         # optimizers
@@ -50,7 +62,8 @@ class ACON(Algorithm):
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.attention.parameters()}],
+            {'params': self.attention.parameters()},
+            {'params': self.graph_corr.parameters()}],
             lr=args.lr,
             weight_decay=args.weight_decay
         )
@@ -80,6 +93,7 @@ class ACON(Algorithm):
         out = out.reshape(B, N, length // period, period).contiguous()
         # print(out.shape)
         return out
+    
 
     def get_amplitude(self, x_fft):
         a = x_fft.abs()
@@ -134,9 +148,14 @@ class ACON(Algorithm):
         ft_a_concat = torch.cat([src_a_disc, trg_a_disc], dim=0)
 
         # Domain classification loss
-        feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1).detach()
-        disc_prediction = self.domain_classifier(feat_x_pred)
+        # feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1).detach()
+        # disc_prediction = self.domain_classifier(feat_x_pred)
+        # disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
+
+        graph_feat_detach = self.graph_corr(feat_concat.detach(), ft_a_concat.detach())
+        disc_prediction = self.domain_classifier(graph_feat_detach)
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
+
         domain_acc = self.get_domain_acc(disc_prediction, domain_label_concat)
 
         # update Domain classification
@@ -150,8 +169,11 @@ class ACON(Algorithm):
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0)
 
         # Repeat predictions after updating discriminator
-        feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1)
-        disc_prediction = self.domain_classifier(feat_x_pred)
+        # feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1)
+        # disc_prediction = self.domain_classifier(feat_x_pred)
+
+        graph_feat = self.graph_corr(feat_concat, ft_a_concat)   # خروجی embedding
+        disc_prediction = self.domain_classifier(graph_feat)
         # loss of domain discriminator according to fake labels
         domain_loss = self.cross_entropy(disc_prediction, domain_label_concat)
 
