@@ -166,39 +166,62 @@ class FrequencyAttention(nn.Module):
 
 
 class GraphCorrelation(nn.Module):
-    def __init__(self, t_dim, f_dim, hidden_dim=128, out_dim=128):
-        super(GraphCorrelation, self).__init__()
+    def __init__(self, t_dim, f_dim, hidden_dim=128, out_dim=128, num_layers=2, dropout=0.1):
+        super().__init__()
+        # node embeddings (fine-grained: یک گره برای هر بعد)
         self.scalar2emb_t = nn.Linear(1, hidden_dim)
         self.scalar2emb_f = nn.Linear(1, hidden_dim)
-        self.edge_mlp = nn.Linear(2*hidden_dim, 1)
-        self.gcn = nn.Linear(hidden_dim, out_dim)
-        self.out_dim = 2 * out_dim   # چون readout = mean + max
+
+        # learnable edges (MLP روی الحاق دو نود)
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(2*hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        # GCN: چند لایه پیام‌رسانی با رزیدوال + نرمال‌سازی
+        self.gcn_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)])
+        self.norms      = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(num_layers)])
+        self.dropout    = nn.Dropout(dropout)
+
+        # readout + projection
+        self.readout_proj = nn.Linear(2*hidden_dim, out_dim)  # روی [mean|max] اعمال می‌شود
+        self.out_dim = out_dim
 
     def forward(self, t_feat, f_feat):
-        # t_feat: [B, d_T], f_feat: [B, d_F]
-        Ft = self.scalar2emb_t(t_feat.unsqueeze(-1))  # [B, d_T, hidden_dim]
-        Fz = self.scalar2emb_f(f_feat.unsqueeze(-1))  # [B, d_F, hidden_dim]
-        V = torch.cat([Ft, Fz], dim=1)                # [B, N, hidden_dim], N=d_T+d_F
+        # t_feat:[B, d_T], f_feat:[B, d_F]  → نودها
+        Ft = self.scalar2emb_t(t_feat.unsqueeze(-1))  # [B, d_T, d_h]
+        Fz = self.scalar2emb_f(f_feat.unsqueeze(-1))  # [B, d_F, d_h]
+        V  = torch.cat([Ft, Fz], dim=1)               # [B, N, d_h]; N=d_T+d_F
 
         B, N, Dh = V.shape
         Vi = V.unsqueeze(2).expand(B, N, N, Dh)
         Vj = V.unsqueeze(1).expand(B, N, N, Dh)
         E  = torch.cat([Vi, Vj], dim=-1)              # [B, N, N, 2*Dh]
 
-        # وزن لبه‌ها با MLP → [B, N, N]
-        A = torch.sigmoid(self.edge_mlp(E)).squeeze(-1)
+        # یادگیری‌پذیر + سمترین + غیرمنفی
+        A = torch.sigmoid(self.edge_mlp(E)).squeeze(-1)   # [B, N, N] در (0,1)
+        A = 0.5 * (A + A.transpose(1,2))                  # symmetric
+        I = torch.eye(N, device=A.device).unsqueeze(0).expand(B, -1, -1)
+        A = A + I                                         # self-loop
 
-        # نرمال‌سازی ردیفی پایدار
-        A = torch.softmax(A, dim=-1)
+        # نرمال‌سازی سمترین: A_hat = D^{-1/2} A D^{-1/2}
+        D = A.sum(dim=-1) + 1e-6                          # [B, N]
+        D_inv_sqrt = (1.0 / D).sqrt().unsqueeze(-1)       # [B, N, 1]
+        A_hat = D_inv_sqrt * A * D_inv_sqrt.transpose(1,2)  # [B, N, N]
 
-        # message passing
-        H = torch.bmm(A, V)                # [B, N, Dh]
-        H = torch.relu(self.gcn(H))        # [B, N, out_dim]
+        H = V  # [B, N, d_h]
+        for lin, ln in zip(self.gcn_layers, self.norms):
+            M = torch.bmm(A_hat, H)           # aggregate
+            H2 = lin(M)                       # transform
+            H  = ln(H + F.relu(H2))           # residual + norm
+            H  = self.dropout(H)
 
-        # readout
-        h_mean = H.mean(dim=1)
-        h_max  = H.max(dim=1).values
-        h = torch.cat([h_mean, h_max], dim=1)   # [B, 2*out_dim]
+        # readout + projection به out_dim
+        h_mean = H.mean(dim=1)                # [B, d_h]
+        h_max  = H.max(dim=1).values          # [B, d_h]
+        h_cat  = torch.cat([h_mean, h_max], dim=1)    # [B, 2*d_h]
+        h      = self.readout_proj(h_cat)             # [B, out_dim]
         return h
 
 
