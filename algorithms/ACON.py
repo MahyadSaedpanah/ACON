@@ -39,7 +39,7 @@ class ACON(Algorithm):
             t_dim=self.t_feature_extractor.out_dim,
             f_dim=configs.avg_mode,
             hidden_dim=128,
-            out_dim=self.t_feature_extractor.out_dim
+            out_dim=128,
         ).to(self.device)
         self.domain_classifier = Discriminator(self.graph_corr.out_dim, self.args.disc_hid_dim)
 
@@ -206,6 +206,7 @@ class ACON(Algorithm):
         # update feature extractor
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
         self.optimizer.step()
 
         return {'Src_t_cls_loss': src_t_cls_loss.item(), 

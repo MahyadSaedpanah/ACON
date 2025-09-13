@@ -166,42 +166,40 @@ class FrequencyAttention(nn.Module):
 
 
 class GraphCorrelation(nn.Module):
-    def __init__(self, t_dim, f_dim, hidden_dim=128, out_dim=128, mode="fine"):
+    def __init__(self, t_dim, f_dim, hidden_dim=128, out_dim=128):
         super(GraphCorrelation, self).__init__()
-        self.mode = mode
-        self.proj_t = nn.Linear(t_dim, hidden_dim)
-        self.proj_f = nn.Linear(f_dim, hidden_dim)
-
-        # این دو خط جدید برای ساخت نود به ازای هر بُعد
         self.scalar2emb_t = nn.Linear(1, hidden_dim)
         self.scalar2emb_f = nn.Linear(1, hidden_dim)
-
         self.edge_mlp = nn.Linear(2*hidden_dim, 1)
         self.gcn = nn.Linear(hidden_dim, out_dim)
-
-        # چون در readout قراره mean+max رو concat کنی، خروجی دو برابر میشه
-        self.out_dim = 2 * out_dim
+        self.out_dim = 2 * out_dim   # چون readout = mean + max
 
     def forward(self, t_feat, f_feat):
         # t_feat: [B, d_T], f_feat: [B, d_F]
         Ft = self.scalar2emb_t(t_feat.unsqueeze(-1))  # [B, d_T, hidden_dim]
         Fz = self.scalar2emb_f(f_feat.unsqueeze(-1))  # [B, d_F, hidden_dim]
-        V = torch.cat([Ft, Fz], dim=1)                # [B, d_T+d_F, hidden_dim]
-    
-        # adjacency
-        Vn = F.normalize(V, dim=-1)
-        A = torch.einsum("bid,bjd->bij", Vn, Vn)      # [B, N, N]
-        I = torch.eye(A.size(1), device=A.device).unsqueeze(0)
-        A = A + I
-    
+        V = torch.cat([Ft, Fz], dim=1)                # [B, N, hidden_dim], N=d_T+d_F
+
+        B, N, Dh = V.shape
+        Vi = V.unsqueeze(2).expand(B, N, N, Dh)
+        Vj = V.unsqueeze(1).expand(B, N, N, Dh)
+        E  = torch.cat([Vi, Vj], dim=-1)              # [B, N, N, 2*Dh]
+
+        # وزن لبه‌ها با MLP → [B, N, N]
+        A = torch.sigmoid(self.edge_mlp(E)).squeeze(-1)
+
+        # نرمال‌سازی ردیفی پایدار
+        A = torch.softmax(A, dim=-1)
+
         # message passing
-        H = torch.bmm(A, V)                           # [B, N, hidden_dim]
-        H = torch.relu(self.gcn(H))                   # [B, N, out_dim]
-    
+        H = torch.bmm(A, V)                # [B, N, Dh]
+        H = torch.relu(self.gcn(H))        # [B, N, out_dim]
+
         # readout
-        h_mean = H.mean(dim=1)                        # [B, out_dim]
-        h_max  = H.max(dim=1).values                  # [B, out_dim]
-        h = torch.cat([h_mean, h_max], dim=1)         # [B, 2*out_dim]
+        h_mean = H.mean(dim=1)
+        h_max  = H.max(dim=1).values
+        h = torch.cat([h_mean, h_max], dim=1)   # [B, 2*out_dim]
         return h
+
 
 
