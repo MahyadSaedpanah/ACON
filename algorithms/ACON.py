@@ -41,7 +41,7 @@ class ACON(Algorithm):
             hidden_dim=128
         ).to(self.device)
 
-        # self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+        self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
 
         # optimizers
@@ -86,8 +86,7 @@ class ACON(Algorithm):
         if a.dim() == 4:
             a = a.mean(dim=2)
         a_disc = a[:, :, :self.fft_mode]
-        # a_disc = self.avg_pooling(a_disc.mean(dim=1)).softmax(-1)
-        a_disc = a_disc.mean(dim=1).softmax(-1)
+        a_disc = self.avg_pooling(a_disc.mean(dim=1)).softmax(-1)
         a_cls = a[:, :, :self.fft_mode]
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
@@ -127,10 +126,9 @@ class ACON(Algorithm):
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
 
         
-        # src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
-        # trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
-        src_a_disc = src_f_feat.softmax(-1)
-        trg_a_disc = trg_f_feat.softmax(-1)
+        src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
+        trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
+
 
 
         ft_a_concat = torch.cat([src_a_disc, trg_a_disc], dim=0)
