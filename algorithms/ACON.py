@@ -44,7 +44,10 @@ class ACON(Algorithm):
 
 
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
-        
+
+        # learnable projection
+        self.freq_proj = nn.Linear(self.fft_mode, self.avg_mode).to(self.device)
+
 
         # optimizers
         self.optimizer = torch.optim.Adam([
@@ -137,7 +140,8 @@ class ACON(Algorithm):
     
         def disc_proj(weighted_vec):
             w = weighted_vec.view(B, C, F_dim)        # [B, C, F]
-            w = self.avg_pooling(w.mean(dim=1))       # [B, avg_mode]
+            w = w.mean(dim=1)                         # [B, F]
+            w = self.freq_proj(w)                     # [B, avg_mode]  ← learnable pooling
             return torch.softmax(w, dim=-1)
     
         src_disc = disc_proj(src_f_in)
@@ -258,6 +262,7 @@ class ACON(Algorithm):
             'f_classifier':self.f_classifier.state_dict(),
             'attention': self.attention.state_dict(),
             'freq_head': self.freq_head.state_dict(),
+            'freq_proj': self.freq_proj.state_dict(),
         }, path)
 
     def load_model(self, path):
@@ -268,6 +273,7 @@ class ACON(Algorithm):
         self.f_classifier.load_state_dict(checkpoint['f_classifier'])
         self.attention.load_state_dict(checkpoint['attention'])
         self.freq_head.load_state_dict(checkpoint['freq_head'])
+        self.freq_proj.load_state_dict(checkpoint['freq_proj'])
 
 
     def get_domain_acc(self, pred, label):
