@@ -40,6 +40,8 @@ class ACON(Algorithm):
             input_dim=self.fft_mode * configs.input_channels,
             hidden_dim=128
         ).to(self.device)
+        self.freq_head = nn.Linear(configs.input_channels, configs.num_classes).to(self.device)
+
 
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
@@ -50,7 +52,9 @@ class ACON(Algorithm):
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.attention.parameters()}],
+            {'params': self.attention.parameters()},
+            {'params': self.freq_head.parameters()}
+            ],
             lr=args.lr,
             weight_decay=args.weight_decay
         )
@@ -116,7 +120,7 @@ class ACON(Algorithm):
         src_a_cls, _ = self.get_amplitude(src_f_feat)
         trg_a_cls, _ = self.get_amplitude(trg_f_feat)
     
-        # --- attention
+        # --- attention برای هر دو دامنه
         src_attn_weights = self.attention(src_a_cls.detach())
         trg_attn_weights = self.attention(trg_a_cls.detach())
     
@@ -129,11 +133,11 @@ class ACON(Algorithm):
         # 4) discriminator input از attention-weighted
         B = src_f_in.size(0)
         C = self.f_feature_extractor.out_channels
-        F_dim = self.fft_mode   # ⚠️ اسم رو تغییر دادیم که با F (functional) تداخل نکنه
+        F_dim = self.fft_mode
     
         def disc_proj(weighted_vec):
-            w = weighted_vec.view(B, C, F_dim)          # [B, C, F]
-            w = self.avg_pooling(w.mean(dim=1))         # [B, avg_mode]
+            w = weighted_vec.view(B, C, F_dim)        # [B, C, F]
+            w = self.avg_pooling(w.mean(dim=1))       # [B, avg_mode]
             return torch.softmax(w, dim=-1)
     
         src_disc = disc_proj(src_f_in)
@@ -179,12 +183,31 @@ class ACON(Algorithm):
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
     
-        # 10) attention loss (ایمن‌سازی log)
-        src_log_probs = F.log_softmax(src_f_pred, dim=1).clamp(min=-1e2, max=1e2)
-        src_labels_onehot = F.one_hot(src_y, num_classes=src_log_probs.size(1)).float()
-        loss_attention = -torch.sum(
-            src_attn_weights * torch.sum(src_log_probs * src_labels_onehot, dim=1, keepdim=True)
-        ) / src_y.size(0)
+        # 10) Attention loss دقیق طبق PDF
+        # reshape به [B, C, F]
+        src_z = src_f_in.view(B, C, F_dim)   # [B, C, F]
+    
+        # سر per-frequency: خروجی [B, F, num_classes]
+        src_freq_logits = self.freq_head(src_z.permute(0, 2, 1))
+    
+        # log-softmax روی کلاس‌ها
+        # src_freq_logprob = F.log_softmax(src_freq_logits, dim=-1)
+        src_freq_logprob = F.log_softmax(src_freq_logits, dim=-1).clamp(min=-1e2, max=1e2)
+
+    
+        # one-hot labels
+        src_labels_onehot = F.one_hot(src_y, num_classes=src_freq_logprob.size(-1)).float()
+    
+        # log p(y|v_ij) برای هر فرکانس j
+        src_logp_perfreq = torch.sum(src_freq_logprob * src_labels_onehot.unsqueeze(1), dim=-1)  # [B, F]
+    
+        # Attention weights روی محور فرکانس
+        src_attn_f = src_attn_weights.view(B, C, F_dim).mean(dim=1)  # [B, F]
+        src_attn_f = F.softmax(src_attn_f, dim=-1)  # normalize across frequencies
+
+    
+        # Attention loss طبق PDF
+        loss_attention = -torch.mean(torch.sum(src_attn_f * src_logp_perfreq, dim=1))
     
         # 11) total loss
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
@@ -197,7 +220,7 @@ class ACON(Algorithm):
         # 12) update feature extractors + classifiers
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)  # ⚠️ gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)  # gradient clipping
         self.optimizer.step()
     
         return {
@@ -211,6 +234,7 @@ class ACON(Algorithm):
             'domain acc': domain_acc.item(),
             'attn_loss': loss_attention.item()
         }
+
 
 
     
@@ -233,6 +257,7 @@ class ACON(Algorithm):
             'f_encoder':self.f_feature_extractor.state_dict(),
             'f_classifier':self.f_classifier.state_dict(),
             'attention': self.attention.state_dict(),
+            'freq_head': self.freq_head.state_dict(),
         }, path)
 
     def load_model(self, path):
@@ -242,6 +267,8 @@ class ACON(Algorithm):
         self.f_feature_extractor.load_state_dict(checkpoint['f_encoder'])
         self.f_classifier.load_state_dict(checkpoint['f_classifier'])
         self.attention.load_state_dict(checkpoint['attention'])
+        self.freq_head.load_state_dict(checkpoint['freq_head'])
+
 
     def get_domain_acc(self, pred, label):
         pred = torch.argmax(pred, dim=1)
