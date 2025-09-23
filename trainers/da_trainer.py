@@ -23,6 +23,8 @@ from algorithms import get_algorithm_class
 from algorithms.utils import get_time
 from algorithms.utils import AverageMeter
 from sklearn.metrics import f1_score
+from utils.plot import plot_losses, plot_metrics
+
 torch.backends.cudnn.benchmark = True  
 warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)        
    
@@ -120,6 +122,9 @@ class da_trainer(object):
                 df_a.to_csv(path,sep = ',')
                 path_s =  os.path.join(self.avg_res_dir, 'test_source_results.csv')
                 df_s.to_csv(path_s,sep = ',')
+                plot_losses(loss_history, self.avg_res_dir, run_id)
+                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id)
+
        
         df_a = self.avg_result(df_a)
         df_s = self.avg_result(df_s)
@@ -178,6 +183,9 @@ class da_trainer(object):
                 
                 algorithm.to(self.device)
                 self.algorithm = algorithm
+                loss_history = {} 
+                acc_history, f1_history = [], [] 
+
                 # Average meters
                 loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
                 self.logger.debug('Source Train Dataset {}  Target Train Dataset {}'.format(len(self.src_train_dl), len(self.trg_train_dl)))
@@ -197,6 +205,11 @@ class da_trainer(object):
 
                         for key, val in losses.items():
                             loss_avg_meters[key].update(val, src_x.size(0))
+                            if key not in loss_history:
+                                loss_history[key] = []
+                            loss_history[key].append(val)
+                                
+
                         
                         if step // self.args.print_freq == 0:
                             keys = loss_avg_meters.keys()
@@ -213,6 +226,8 @@ class da_trainer(object):
                    # testing
                     acc, f1 = self.evaluate()
                     self.logger.debug('acc {}   f1 {}'.format(acc, f1))
+                    acc_history.append(acc)
+                    f1_history.append(f1)
                     if f1>=self.best_f1:
                         self.best_f1 = f1
                         self.logger.debug('best model {}'.format(epoch))
@@ -234,6 +249,9 @@ class da_trainer(object):
                 df_a.to_csv(path,sep = ',')
                 path_s =  os.path.join(self.avg_res_dir, 'source_results.csv')
                 df_s.to_csv(path_s,sep = ',')
+                plot_losses(loss_history, self.avg_res_dir, run_id)
+                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id)
+
 
 
         df_a = self.avg_result(df_a)
