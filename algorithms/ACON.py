@@ -32,10 +32,25 @@ class ACON(Algorithm):
         # model
         self.t_feature_extractor = CNN(configs)
         self.t_classifier = TemporalClassifierHead(self.t_feature_extractor.out_dim, configs.num_classes)
-        self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
+        # self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+
+                # ماژول گراف جدید
+        self.graph_module = GraphCorrelationModule(
+            t_dim=self.t_feature_extractor.out_dim,
+            f_dim=self.f_classifier.linear1.in_features,
+            hidden_dim=64,
+            out_dim=128
+        )
+
+        # discriminator بر اساس خروجی گراف
+        self.domain_classifier = Discriminator(
+            self.graph_module.out_dim,
+            self.args.disc_hid_dim
+        )
+
         
 
         # optimizers
@@ -87,94 +102,86 @@ class ACON(Algorithm):
     
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
-
-        # prepare true domain labels
+    
+        # labels دامنه
         domain_label_src = torch.ones(len(src_x)).to(self.device)
         domain_label_trg = torch.zeros(len(trg_x)).to(self.device)
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0).long()
-
-        # source features and predictions
+    
+        # ویژگی‌های زمانی
         src_t_feat = self.t_feature_extractor(src_x)
         src_t_pred = self.t_classifier(src_t_feat)
-
-        # target features and predictions
         trg_t_feat = self.t_feature_extractor(trg_x)
         trg_t_pred = self.t_classifier(trg_t_feat)
-
-        # concatenate features
-        feat_concat = torch.cat((src_t_feat, trg_t_feat), dim=0)
-
-        
-        
+    
+        # ویژگی‌های فرکانسی
         src_f_feat = self.f_feature_extractor(self.period_data(src_x,self.period))
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x,self.period))
-        src_a_cls, src_a_disc = self.get_amplitude(src_f_feat)
-        trg_a_cls, trg_a_disc = self.get_amplitude(trg_f_feat)
+        src_a_cls, _ = self.get_amplitude(src_f_feat)
+        trg_a_cls, _ = self.get_amplitude(trg_f_feat)
+    
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
-
-        
-        src_a_disc = self.avg_pooling(src_f_feat).softmax(-1)
-        trg_a_disc = self.avg_pooling(trg_f_feat).softmax(-1)
-
-
-
-        ft_a_concat = torch.cat([src_a_disc, trg_a_disc], dim=0)
-
-        # Domain classification loss
-        feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1).detach()
-        disc_prediction = self.domain_classifier(feat_x_pred)
+    
+        # 👇 Pooling مثل ACON اصلی
+        src_f_reduced = self.avg_pooling(src_f_feat).softmax(-1)
+        trg_f_reduced = self.avg_pooling(trg_f_feat).softmax(-1)
+    
+        # 👇 گراف: ورودی = temporal + فرکانس pool شده
+        h_src = self.graph_module(src_t_feat, src_f_reduced)
+        h_trg = self.graph_module(trg_t_feat, trg_f_reduced)
+        h_concat = torch.cat([h_src, h_trg], dim=0)
+    
+        # --- domain loss ---
+        disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
         domain_acc = self.get_domain_acc(disc_prediction, domain_label_concat)
-
-        # update Domain classification
+    
         self.optimizer_disc.zero_grad()
         disc_loss.backward()
         self.optimizer_disc.step()
-
-        # prepare fake domain labels for training the feature extractor
+    
+        # fake labels
         domain_label_src = torch.zeros(len(src_x)).long().to(self.device)
         domain_label_trg = torch.ones(len(trg_x)).long().to(self.device)
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0)
-
-        # Repeat predictions after updating discriminator
-        feat_x_pred = torch.bmm(ft_a_concat.unsqueeze(2), feat_concat.unsqueeze(1)).view(bs*2, -1)
-        disc_prediction = self.domain_classifier(feat_x_pred)
-        # loss of domain discriminator according to fake labels
+    
+        disc_prediction = self.domain_classifier(h_concat)
         domain_loss = self.cross_entropy(disc_prediction, domain_label_concat)
-
-        # Task classification  Loss
+    
+        # --- task losses ---
         src_t_cls_loss = self.cross_entropy(src_t_pred.squeeze(), src_y)
         src_f_cls_loss = self.cross_entropy(src_f_pred.squeeze(), src_y)
-
-        # align temporal domain and spetral domain
-        align_s_tf_loss = self.kl(F.log_softmax(src_t_pred / self.kl_t, dim=-1), F.softmax(src_f_pred / self.kl_t, dim=-1)+1e-5)
-        align_t_tf_loss = self.kl(F.log_softmax(trg_f_pred / self.kl_t, dim=-1), F.softmax(trg_t_pred / self.kl_t, dim=-1))        
-        
-        # conditional entropy loss.
+    
+        align_s_tf_loss = self.kl(F.log_softmax(src_t_pred/self.kl_t, dim=-1),
+                                  F.softmax(src_f_pred/self.kl_t, dim=-1) + 1e-5)
+        align_t_tf_loss = self.kl(F.log_softmax(trg_f_pred/self.kl_t, dim=-1),
+                                  F.softmax(trg_t_pred/self.kl_t, dim=-1))
+    
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
-
-        loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
-               + self.args.domain_trade_off * domain_loss \
-               + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
-               + self.args.align_t_trade_off * align_t_tf_loss \
-               + self.args.align_s_trade_off * align_s_tf_loss \
-
-
-        # update feature extractor
+    
+        loss = self.args.cls_trade_off*(src_t_cls_loss+src_f_cls_loss) \
+               + self.args.domain_trade_off*domain_loss \
+               + self.args.entropy_trade_off*(entropy_trg_t+entropy_trg_f) \
+               + self.args.align_t_trade_off*align_t_tf_loss \
+               + self.args.align_s_trade_off*align_s_tf_loss
+    
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
-        return {'Src_t_cls_loss': src_t_cls_loss.item(), 
-                'Src_f_cls_loss': src_f_cls_loss.item(), 
-                'Domain_loss': domain_loss.item(), 
-                'align source tf loss': align_s_tf_loss.item(),
-                'align target tf loss': align_t_tf_loss.item(),
-                'cond_ent_loss_t': entropy_trg_t.item(),
-                'cond_ent_loss_f': entropy_trg_f.item(),
-                'domain acc': domain_acc.item()}
+    
+        return {
+            'Src_t_cls_loss': src_t_cls_loss.item(),
+            'Src_f_cls_loss': src_f_cls_loss.item(),
+            'Domain_loss': domain_loss.item(),
+            'align source tf loss': align_s_tf_loss.item(),
+            'align target tf loss': align_t_tf_loss.item(),
+            'cond_ent_loss_t': entropy_trg_t.item(),
+            'cond_ent_loss_f': entropy_trg_f.item(),
+            'domain acc': domain_acc.item()
+        }
+    
     
     '''return predictions'''
     def predict(self, data):
@@ -207,6 +214,5 @@ class ACON(Algorithm):
         pred = torch.argmax(pred, dim=1)
         res = torch.sum(torch.eq(pred, label)) / label.size(0)
         return res
-
 
 
