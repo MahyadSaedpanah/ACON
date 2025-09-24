@@ -151,3 +151,67 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+
+
+class SimpleGCNLayer(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super(SimpleGCNLayer, self).__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+
+    def forward(self, X, A):
+        """
+        X: [B, N, D]   (node features)
+        A: [B, N, N]   (adjacency matrix with weights)
+        """
+        D = A.sum(-1, keepdim=True) + 1e-6
+        A_norm = A / D  # degree normalization
+
+        H = torch.bmm(A_norm, X)  # aggregate neighbors
+        H = self.linear(H)
+        return F.relu(H)
+
+
+class GraphCorrelationModule(nn.Module):
+    def __init__(self, t_dim, f_dim, hidden_dim=64, out_dim=128):
+        super(GraphCorrelationModule, self).__init__()
+        self.t_dim = t_dim
+        self.f_dim = f_dim
+        self.node_dim = 1  # هر بعد یک نود → فیچر اسکالر
+
+        # MLP برای محاسبه وزن یال‌ها
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(2 * self.node_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        # GCN
+        self.gcn = SimpleGCNLayer(self.node_dim, out_dim)
+
+        self.out_dim = out_dim
+
+    def forward(self, f_feat, z_feat):
+        B, dT = f_feat.shape
+        _, dF = z_feat.shape
+
+        # هر بعد به‌عنوان یک نود (اسکالر)
+        f_nodes = f_feat.unsqueeze(-1)  # [B, dT, 1]
+        z_nodes = z_feat.unsqueeze(-1)  # [B, dF, 1]
+        nodes = torch.cat([f_nodes, z_nodes], dim=1)  # [B, N, 1], N=dT+dF
+
+        N = nodes.size(1)
+
+        # adjacency: وزن بین همه جفت نودها
+        node_i = nodes.unsqueeze(2).repeat(1, 1, N, 1)  # [B, N, N, 1]
+        node_j = nodes.unsqueeze(1).repeat(1, N, 1, 1)  # [B, N, N, 1]
+        edges = torch.cat([node_i, node_j], dim=-1)     # [B, N, N, 2]
+
+        A = torch.sigmoid(self.edge_mlp(edges)).squeeze(-1)  # [B, N, N]
+
+        # GCN propagation
+        H = self.gcn(nodes, A)   # [B, N, out_dim]
+
+        # pool روی نودها → بردار نهایی
+        H = H.mean(1)  # [B, out_dim]
+
+        return H
