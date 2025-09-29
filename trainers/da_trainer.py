@@ -183,8 +183,10 @@ class da_trainer(object):
                 
                 algorithm.to(self.device)
                 self.algorithm = algorithm
-                loss_history = {} 
-                acc_history, f1_history = [], [] 
+                source_loss_history = {}
+                target_loss_history = {}
+                acc_history, f1_history = [], []
+
 
                 # Average meters
                 loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
@@ -205,9 +207,17 @@ class da_trainer(object):
 
                         for key, val in losses.items():
                             loss_avg_meters[key].update(val, src_x.size(0))
-                            if key not in loss_history:
-                                loss_history[key] = []
-                            loss_history[key].append(val)
+                            # save for source
+                            if "Src" in key or "Domain" in key:
+                                if key not in source_loss_history:
+                                    source_loss_history[key] = []
+                                source_loss_history[key].append(val)
+
+                            # save for target
+                            if key in ["align target tf loss", "cond_ent_loss_t", "cond_ent_loss_f"]:
+                                if key not in target_loss_history:
+                                    target_loss_history[key] = []
+                                target_loss_history[key].append(val)
                                 
 
                         
@@ -249,8 +259,11 @@ class da_trainer(object):
                 df_a.to_csv(path,sep = ',')
                 path_s =  os.path.join(self.avg_res_dir, 'source_results.csv')
                 df_s.to_csv(path_s,sep = ',')
-                plot_losses(loss_history, self.avg_res_dir, run_id)
-                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id)
+                # save plots         
+                plot_losses(source_loss_history, self.avg_res_dir, run_id, mode="source")
+                plot_losses(target_loss_history, self.avg_res_dir, run_id, mode="target")
+                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id, mode="target")
+
 
 
 

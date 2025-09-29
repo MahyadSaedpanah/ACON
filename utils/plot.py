@@ -1,8 +1,9 @@
 import os
 import matplotlib.pyplot as plt
 
-def plot_losses(loss_dict, save_dir, run_id):
-    plot_dir = os.path.join(save_dir, "plot")
+def plot_losses(loss_dict, save_dir, run_id, mode="source"):
+
+    plot_dir = os.path.join(save_dir, "plot", mode)
     os.makedirs(plot_dir, exist_ok=True)
 
     for loss_name, values in loss_dict.items():
@@ -17,8 +18,9 @@ def plot_losses(loss_dict, save_dir, run_id):
         plt.close()
 
 
-def plot_metrics(acc_list, f1_list, save_dir, run_id):
-    plot_dir = os.path.join(save_dir, "plot")
+def plot_metrics(acc_list, f1_list, save_dir, run_id, mode="target"):
+
+    plot_dir = os.path.join(save_dir, "plot", mode)
     os.makedirs(plot_dir, exist_ok=True)
 
     # Accuracy
