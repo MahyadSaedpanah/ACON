@@ -151,3 +151,129 @@ class FrequencyEncoder(nn.Module):
             out_ft[:, :, :, :] = self.compl_mul1d(x_ft[:, :, :, :self.mode], self.weights1)
         # print(out_ft)
         return out_ft
+
+
+
+class BetterGCN(nn.Module):
+    """
+    GCN دو لایه با residual + LayerNorm + attention pooling روی نودها
+    خروجی همیشه out_dim=128
+    """
+    def __init__(self, in_dim, hidden_dim=64, out_dim=128, dropout=0.1):
+        super().__init__()
+        self.lin1 = nn.Linear(in_dim, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, out_dim)
+
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
+
+        self.pool_att = nn.Linear(out_dim, 1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.out_dim = out_dim
+
+    def forward(self, X, A):
+        B, N, F = X.shape
+
+        # --- لایه اول ---
+        D = A.sum(-1, keepdim=True) + 1e-6
+        A_norm = A / D
+        H = torch.bmm(A_norm, X)
+        H = self.lin1(H)
+        H = self.norm1(H)
+        H = torch.relu(H)
+        H = self.dropout(H)
+
+        # --- لایه دوم ---
+        D = A.sum(-1, keepdim=True) + 1e-6
+        A_norm = A / D
+        H2 = torch.bmm(A_norm, H)
+        H2 = self.lin2(H2)
+        H2 = self.norm2(H2)
+
+        # --- residual connection ---
+        if H.shape[-1] == H2.shape[-1]:
+            H2 = H2 + H
+
+        # --- attention pooling روی نودها ---
+        alpha = torch.softmax(self.pool_att(H2), dim=1)  # [B, N, 1]
+        out = (alpha * H2).sum(dim=1)                    # [B, out_dim]
+
+        return out
+
+
+
+class GraphCorrelationModule(nn.Module):
+    """
+    نسخه گرافی بر اساس ساختار نسخه اصلی ACON
+    - Temporal: کل فیچرها (بدون کاهش)
+    - Frequency: خلاصه‌شده با AdaptiveAvgPool1d(avg_mode)
+    - سپس تبدیل به نودها و پردازش با BetterGCN
+    """
+    def __init__(self, t_dim, f_dim, avg_mode=16,
+                 node_embed=16, gnn_hidden=64, out_dim=128, dropout=0.1):
+        super(GraphCorrelationModule, self).__init__()
+
+        self.t_dim = t_dim
+        self.f_dim = f_dim
+        self.avg_mode = avg_mode
+        self.num_nodes = t_dim + avg_mode
+
+        # خلاصه کردن فرکانس (مثل نسخه اصلی)
+        self.avg_pool = nn.AdaptiveAvgPool1d(avg_mode)
+
+        # تع嵌‌سازی نودها
+        self.node_mlp = nn.Sequential(
+            nn.Linear(1, node_embed),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        # adjacency با MLP ساده
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(2 * node_embed, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+        # GCN
+        self.gcn = BetterGCN(node_embed, hidden_dim=gnn_hidden,
+                             out_dim=out_dim, dropout=dropout)
+
+        self.out_dim = out_dim
+
+    def _build_adj(self, Z):
+        B, N, E = Z.shape
+        Zi = Z.unsqueeze(2).expand(B, N, N, E)
+        Zj = Z.unsqueeze(1).expand(B, N, N, E)
+        edges = torch.cat([Zi, Zj], dim=-1)              # [B, N, N, 2E]
+        A = torch.sigmoid(self.edge_mlp(edges)).squeeze(-1)  # [B, N, N]
+
+        # self-loop
+        I = torch.eye(N, device=Z.device).unsqueeze(0).expand(B, N, N)
+        return torch.clamp(A + 0.1 * I, 0., 1.)
+
+    def forward(self, t_feat, f_feat):
+        B = t_feat.size(0)
+
+        # Temporal نودها
+        t_nodes = t_feat.unsqueeze(-1)  # [B, t_dim, 1]
+
+        # Frequency نودها (avg pooling → avg_mode)
+        f_feat = f_feat.unsqueeze(1)              # [B, 1, d_F]
+        f_nodes = self.avg_pool(f_feat).squeeze(1).unsqueeze(-1)  # [B, avg_mode, 1]
+
+        # ترکیب نودها
+        nodes = torch.cat([t_nodes, f_nodes], dim=1)  # [B, N, 1]
+
+        # تع嵌‌سازی
+        Z = self.node_mlp(nodes)   # [B, N, node_embed]
+
+        # adjacency
+        A = self._build_adj(Z)     # [B, N, N]
+
+        # GCN
+        out = self.gcn(Z, A)       # [B, out_dim]
+
+        return out
+
