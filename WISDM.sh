@@ -12,4 +12,8 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --align_t_trade_off 1 \
  --align_s_trade_off 1 \
  --kl_t 2.0 \
- --device cuda \
+ --tau 0.05 \
+ --cl_trade_off 0.1 \
+ --conf_thresh 0.7 \
+ --debug
+#  --device cuda \

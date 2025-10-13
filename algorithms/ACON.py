@@ -53,7 +53,17 @@ class ACON(Algorithm):
             self.args.disc_hid_dim
         )
 
+        self.contrastive_proj = nn.Sequential(
+            nn.Linear(self.graph_module.out_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            # nn.Tanh()
+        )
+
+
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+        
+        
         
 
         # optimizers
@@ -135,28 +145,55 @@ class ACON(Algorithm):
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)  # [B, num_classes], [B, d_F]
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
     
+        # Contrastive Loss (با projection بدون نرمال‌سازی بیرونی)
         # -------------------------------
-        # 4) گراف (AttentionTopK + GCN)
-        # -------------------------------
-        h_src = self.graph_module(src_t_feat, src_f_feat)  # [B, out_dim]
+        # ساخت h با GCN
+        h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
 
-        # -------------------------------
-        # Contrastive Loss (L_CL)
-        # -------------------------------
+        # projection head
+        h_src_proj = self.contrastive_proj(h_src)
+        h_trg_proj = self.contrastive_proj(h_trg)
+
+        # اینجا دیگه F.normalize نذار — نرمال‌سازی داخل contrastive_loss انجام میشه
+
+        # pseudo-label برای تارگت
         with torch.no_grad():
-            trg_pseudo = trg_t_pred.argmax(dim=1)  # شبه‌برچسب‌ها
-            trg_conf = F.softmax(trg_t_pred, dim=1).max(dim=1).values
-            mask = trg_conf > 0.7  # فقط نمونه‌های confident
+            trg_probs = F.softmax(trg_t_pred, dim=1)
+            trg_conf, trg_pseudo = trg_probs.max(dim=1)
+            mask = trg_conf > self.args.conf_thresh if hasattr(self.args, 'conf_thresh') else trg_conf > 0.7
         
-        if mask.sum() > 0:  # اگر نمونه confident در target داریم
-            h_cl = torch.cat([h_src, h_trg[mask]], dim=0)
+        # ترکیب سورس و تارگت برای contrastive
+        if mask.sum() > 0:
+            h_cl = torch.cat([h_src_proj, h_trg_proj[mask]], dim=0)
             y_cl = torch.cat([src_y, trg_pseudo[mask]], dim=0)
         else:
-            h_cl = h_src
+            h_cl = h_src_proj
             y_cl = src_y
-        
+
+        # ✅🔍 اضافه کن اینجا برای بررسی:
+        with torch.no_grad():
+            print("🧪 [Contrastive DEBUG] ------------------------")
+
+            # تعداد کلاس‌ها
+            unique_labels = torch.unique(y_cl)
+            print(f"✅ Unique classes: {unique_labels.tolist()} | count = {unique_labels.numel()}")
+
+            # نمونه‌های target که وارد contrastive شدن
+            print(f"✅ Target confident mask: {mask.sum().item()} / {len(mask)}")
+
+            # شباهت کسینوسی بین بردارها
+            sim = F.cosine_similarity(h_cl.unsqueeze(1), h_cl.unsqueeze(0), dim=-1)
+            print(f"✅ Cosine similarity - avg: {sim.mean():.4f}, max: {sim.max():.4f}, min: {sim.min():.4f}")
+
+            # نرمال هنجار بردارها
+            norms = h_cl.norm(p=2, dim=1)
+            print(f"✅ h_cl norm - avg: {norms.mean():.4f}, max: {norms.max():.4f}, min: {norms.min():.4f}")
+
+    
+        # محاسبه contrastive loss
         cl_loss = self.contrastive_loss(h_cl, y_cl, temperature=self.args.tau)
+
 
         h_concat = torch.cat([h_src, h_trg], dim=0)        # [2B, out_dim]
     
@@ -247,25 +284,28 @@ class ACON(Algorithm):
             pred = self.t_classifier(t_feat)
         return pred
 
-    def contrastive_loss(self, h, labels, temperature=0.07):
-        h = F.normalize(h, dim=1)  # نرمال‌سازی
-        sim_matrix = torch.matmul(h, h.T) / temperature  # ماتریس شباهت
+    def contrastive_loss(self, h, labels, temperature=0.07, eps=1e-8):
+        h = F.normalize(h, dim=1)
+        sim_matrix = torch.matmul(h, h.T) / temperature
+
+        # with torch.no_grad():
+        #     cos_sim = torch.matmul(h, h.T)
+        #     print(f"[CL] ✅ cos_sim avg: {cos_sim.mean():.4f}, max: {cos_sim.max():.4f}, min: {cos_sim.min():.4f}")
+        #     norms = h.norm(p=2, dim=1)
+        #     print(f"[CL] 🔍 h norm avg: {norms.mean():.4f}, max: {norms.max():.4f}, min: {norms.min():.4f}")
 
         labels = labels.contiguous().view(-1, 1)
-        mask = torch.eq(labels, labels.T).float().to(h.device)  # ماسک مثبت‌ها
+        mask = torch.eq(labels, labels.T).float().to(h.device)
 
-        # log-softmax
+        if torch.unique(labels).numel() < 2:
+            return torch.tensor(0.0, device=h.device, requires_grad=True)
+        
         exp_sim = torch.exp(sim_matrix)
-        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
-
-        # میانگین log_prob مثبت‌ها
-        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + 1e-8)
-        loss = -mean_log_prob_pos.mean()
-        return loss
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + eps)
+        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + eps)
+        return -mean_log_prob_pos.mean()
 
         
-       
-
     def save_model(self, path):
         torch.save({
             't_encoder': self.t_feature_extractor.state_dict(),
