@@ -77,6 +77,9 @@ class ACON(Algorithm):
         self.criterion_cond = ConditionalEntropyLoss().to(device)
         self.kl = nn.KLDivLoss(reduction=args.kl_reduction)
 
+        self.mc_passes = getattr(args, "mc_passes", 10)
+
+
 
     def period_data(self, x, period):
         B = x.size(0)
@@ -172,14 +175,48 @@ class ACON(Algorithm):
         # -------------------------------
         # 8) Alignment losses
         # -------------------------------
+        # align_s_tf_loss = self.kl(
+        #     F.log_softmax(src_t_pred / self.kl_t, dim=-1),
+        #     F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
+        # )
+        # align_t_tf_loss = self.kl(
+        #     F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+        #     F.softmax(trg_t_pred / self.kl_t, dim=-1)
+        # )
+        
+
+
+        # prevent exploding KL loss due to very small uncertainties
+
+        
+        # Step 1: compute uncertainty for each
+        uncert_src_t = self.compute_uncertainty(self.t_classifier, src_t_feat)
+        uncert_src_f = self.compute_uncertainty(self.f_classifier, src_f_feat)
+        uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
+        uncert_trg_f = self.compute_uncertainty(self.f_classifier, trg_f_feat)
+
+        uncert_src_f = torch.clamp(uncert_src_f, min=1e-2)
+        uncert_trg_t = torch.clamp(uncert_trg_t, min=1e-2)
+
+        # Step 2: compute KL per sample
+        kl_src = F.kl_div(F.log_softmax(src_t_pred / self.kl_t, dim=-1),
+                          F.softmax(src_f_pred / self.kl_t, dim=-1),
+                          reduction='none').sum(dim=1)  # [B]
+        kl_trg = F.kl_div(F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+                          F.softmax(trg_t_pred / self.kl_t, dim=-1),
+                          reduction='none').sum(dim=1)  # [B]
+
+        # Step 3: weight by uncertainty
+        eps = 1e-6
+        # align_s_tf_loss = ((1 / (uncert_src_f + eps)) * kl_src).mean()
+        
         align_s_tf_loss = self.kl(
             F.log_softmax(src_t_pred / self.kl_t, dim=-1),
             F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
         )
-        align_t_tf_loss = self.kl(
-            F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-            F.softmax(trg_t_pred / self.kl_t, dim=-1)
-        )
+        align_t_tf_loss = ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
+
+        
     
         # -------------------------------
         # 9) Conditional entropy loss (روی target)
@@ -217,7 +254,22 @@ class ACON(Algorithm):
             'domain acc': domain_acc.item()
         }
     
-    
+
+    # Uncertainty-Aware Mutual Learning
+
+    def compute_uncertainty(self, model_fn, x, M=None):
+        """Monte Carlo Dropout uncertainty estimation over model_fn(x)"""
+        M = M or self.mc_passes  # default: 10
+        preds = []
+        for _ in range(M):
+            with torch.no_grad():
+                y = model_fn(x)
+                preds.append(F.softmax(y, dim=1))  # [B, C]
+        stacked_preds = torch.stack(preds)  # [M, B, C]
+        var = torch.var(stacked_preds, dim=0)  # [B, C]
+        return var.mean(dim=1)  # [B]
+
+
     '''return predictions'''
     def predict(self, data):
         self.t_feature_extractor.eval()
