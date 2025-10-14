@@ -45,6 +45,15 @@ class ACON(Algorithm):
             node_embed=16, gnn_hidden=64, out_dim=128, dropout=0.1
         )
 
+        #contrastive projection head
+        self.contrastive_proj = nn.Sequential(
+            nn.Linear(self.graph_module.out_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU()
+        )
 
 
         # discriminator روی خروجی گراف
@@ -62,7 +71,8 @@ class ACON(Algorithm):
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
+            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
+            {'params': self.contrastive_proj.parameters()},
             ],
             lr=args.lr,
             weight_decay=args.weight_decay
@@ -140,6 +150,41 @@ class ACON(Algorithm):
         # -------------------------------
         h_src = self.graph_module(src_t_feat, src_f_feat)  # [B, out_dim]
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
+        
+        h_src_proj = self.contrastive_proj(h_src)
+        h_trg_proj = self.contrastive_proj(h_trg)
+
+        # Pseudo-label و confident mask
+        with torch.no_grad():
+            trg_probs = F.softmax(trg_t_pred, dim=1)
+            trg_conf, trg_pseudo = trg_probs.max(dim=1)
+            mask = trg_conf > self.args.conf_thresh if hasattr(self.args, 'conf_thresh') else trg_conf > 0.7
+
+        if mask.sum() > 0:
+            h_cl = torch.cat([h_src_proj, h_trg_proj[mask]], dim=0)
+            y_cl = torch.cat([src_y, trg_pseudo[mask]], dim=0)
+        else:
+            h_cl = h_src_proj
+            y_cl = src_y
+
+        h_cl = F.normalize(h_cl, dim=1)
+        
+        cl_loss = self.contrastive_loss(h_cl, y_cl, temperature=self.args.tau)
+
+        with torch.no_grad():
+            unique_classes = torch.unique(y_cl).tolist()
+            cos_sim_matrix = F.cosine_similarity(h_cl.unsqueeze(1), h_cl.unsqueeze(0), dim=-1)
+            sim_avg = cos_sim_matrix.mean().item()
+            sim_max = cos_sim_matrix.max().item()
+            sim_min = cos_sim_matrix.min().item()
+            h_norms = h_cl.norm(dim=1)
+            print("[Contrastive DEBUG] ------------------------")
+            print(f"Unique classes: {unique_classes} | count = {len(unique_classes)}")
+            print(f"Target confident mask: {mask.sum().item()} / {len(mask)}")
+            print(f"Cosine similarity - avg: {sim_avg:.4f}, max: {sim_max:.4f}, min: {sim_min:.4f}")
+            print(f"h_cl norm - avg: {h_norms.mean():.4f}, max: {h_norms.max():.4f}, min: {h_norms.min():.4f}")
+
+
         h_concat = torch.cat([h_src, h_trg], dim=0)        # [2B, out_dim]
     
         # -------------------------------
@@ -194,7 +239,9 @@ class ACON(Algorithm):
                + self.args.domain_trade_off * domain_loss \
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
                + self.args.align_t_trade_off * align_t_tf_loss \
-               + self.args.align_s_trade_off * align_s_tf_loss
+               + self.args.align_s_trade_off * align_s_tf_loss \
+               + self.args.cl_trade_off * cl_loss
+
     
         # -------------------------------
         # 11) Update feature extractors + graph + classifiers
@@ -214,7 +261,8 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'contrastive_loss': cl_loss.item()
         }
     
     
@@ -226,7 +274,37 @@ class ACON(Algorithm):
             t_feat = self.t_feature_extractor(data)
             pred = self.t_classifier(t_feat)
         return pred
-        
+    
+    def contrastive_loss(self, h, labels, temperature=0.07, eps=1e-8):
+        """
+        Supervised Contrastive Loss
+        """
+
+        # ✅ نرمال‌سازی نهایی (خیلی مهم)
+        h = F.normalize(h, dim=1)
+
+        # 🟡 محاسبه شباهت کسینوسی
+        sim_matrix = torch.matmul(h, h.T) / temperature  # [N, N]
+
+        # 🟡 ساخت ماسک برای نمونه‌های هم‌کلاس
+        labels = labels.contiguous().view(-1, 1)  # [N, 1]
+        mask = torch.eq(labels, labels.T).float().to(h.device)  # [N, N]
+
+        # ⚠️ اگر همه برچسب‌ها یکسان بودن، از loss صرف نظر کن
+        if torch.unique(labels).numel() < 2:
+            return torch.tensor(0.0, device=h.device, requires_grad=True)
+
+        # 🟡 log-softmax
+        exp_sim = torch.exp(sim_matrix)
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + eps)
+
+        # 🟡 محاسبه میانگین log-prob روی نمونه‌های مثبت
+        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + eps)
+
+        # 🟡 نهایی: میانگین منفی
+        loss = -mean_log_prob_pos.mean()
+        return loss
+
        
 
     def save_model(self, path):
