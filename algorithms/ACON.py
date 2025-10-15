@@ -207,14 +207,16 @@ class ACON(Algorithm):
                           reduction='none').sum(dim=1)  # [B]
 
         # Step 3: weight by uncertainty
-        eps = 1e-6
+        eps = 1e-5
         # align_s_tf_loss = ((1 / (uncert_src_f + eps)) * kl_src).mean()
         
         align_s_tf_loss = self.kl(
             F.log_softmax(src_t_pred / self.kl_t, dim=-1),
             F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
         )
-        align_t_tf_loss = ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
+        # align_t_tf_loss = ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
+        beta = self.args.uncertainty_weight  # وزن قابل تنظیم
+        align_t_tf_loss = beta * ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
 
         
     

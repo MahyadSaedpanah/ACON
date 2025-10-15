@@ -51,6 +51,9 @@ parser.add_argument('--domain_trade_off', type=float,default=1.0)
 parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
+parser.add_argument('--uncertainty_weight', type=float, default=1.0,
+                    help='Weight of uncertainty-aware KL loss on target (default=1.0)')
+
 
 # ========= Debug Mode ===============
 parser.add_argument('--debug', action='store_true', help='Run in debug mode (lightweight settings)')
