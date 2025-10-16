@@ -194,6 +194,7 @@ class da_trainer(object):
                 # train
                 for epoch in range(1, self.args.num_epochs + 1):
                     self.logger.debug('Epoch Training {}/{}'.format(epoch, self.args.num_epochs))
+                    algorithm.current_epoch = epoch
                     joint_loaders = enumerate(zip(self.src_train_dl, self.trg_train_dl))
                     algorithm.train()
 

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
+from utils.idea_logger import IdeaLogger
 
 
     
@@ -78,6 +79,10 @@ class ACON(Algorithm):
         self.kl = nn.KLDivLoss(reduction=args.kl_reduction)
 
         self.mc_passes = getattr(args, "mc_passes", 10)
+        self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
+
+        self.idea_logger = IdeaLogger(log_dir=getattr(args, "log_dir", "."))
+
 
 
 
@@ -111,43 +116,28 @@ class ACON(Algorithm):
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
     
-        # -------------------------------
-        # 1) برچسب‌های دامنه (واقعی)
-        # -------------------------------
         domain_label_src = torch.ones(len(src_x)).to(self.device)
         domain_label_trg = torch.zeros(len(trg_x)).to(self.device)
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0).long()
     
-        # -------------------------------
-        # 2) فیچرهای زمانی + پیش‌بینی
-        # -------------------------------
-        src_t_feat = self.t_feature_extractor(src_x)      # [B, d_T]
-        src_t_pred = self.t_classifier(src_t_feat)        # [B, num_classes]
+        src_t_feat = self.t_feature_extractor(src_x)
+        src_t_pred = self.t_classifier(src_t_feat)
         trg_t_feat = self.t_feature_extractor(trg_x)
         trg_t_pred = self.t_classifier(trg_t_feat)
     
-        # -------------------------------
-        # 3) فیچرهای فرکانسی + پیش‌بینی
-        # -------------------------------
-        src_f_feat = self.f_feature_extractor(self.period_data(src_x, self.period))  # [B, d_F]
+        src_f_feat = self.f_feature_extractor(self.period_data(src_x, self.period))
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x, self.period))
     
-        src_a_cls, _ = self.get_amplitude(src_f_feat)  # amplitude خام (برای classification)
+        src_a_cls, _ = self.get_amplitude(src_f_feat)
         trg_a_cls, _ = self.get_amplitude(trg_f_feat)
     
-        src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)  # [B, num_classes], [B, d_F]
+        src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
     
-        # -------------------------------
-        # 4) گراف (AttentionTopK + GCN)
-        # -------------------------------
-        h_src = self.graph_module(src_t_feat, src_f_feat)  # [B, out_dim]
+        h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
-        h_concat = torch.cat([h_src, h_trg], dim=0)        # [2B, out_dim]
+        h_concat = torch.cat([h_src, h_trg], dim=0)
     
-        # -------------------------------
-        # 5) Discriminator - مرحله اول (domain real labels)
-        # -------------------------------
         disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
         domain_acc = self.get_domain_acc(disc_prediction, domain_label_concat)
@@ -156,9 +146,6 @@ class ACON(Algorithm):
         disc_loss.backward()
         self.optimizer_disc.step()
     
-        # -------------------------------
-        # 6) Discriminator - مرحله دوم (fake labels برای فریب دادن)
-        # -------------------------------
         domain_label_src = torch.zeros(len(src_x)).long().to(self.device)
         domain_label_trg = torch.ones(len(trg_x)).long().to(self.device)
         domain_label_concat = torch.cat((domain_label_src, domain_label_trg), 0)
@@ -166,85 +153,73 @@ class ACON(Algorithm):
         disc_prediction = self.domain_classifier(h_concat)
         domain_loss = self.cross_entropy(disc_prediction, domain_label_concat)
     
-        # -------------------------------
-        # 7) Classification losses
-        # -------------------------------
         src_t_cls_loss = self.cross_entropy(src_t_pred.squeeze(), src_y)
         src_f_cls_loss = self.cross_entropy(src_f_pred.squeeze(), src_y)
     
-        # -------------------------------
-        # 8) Alignment losses
-        # -------------------------------
-        # align_s_tf_loss = self.kl(
-        #     F.log_softmax(src_t_pred / self.kl_t, dim=-1),
-        #     F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
-        # )
-        # align_t_tf_loss = self.kl(
-        #     F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-        #     F.softmax(trg_t_pred / self.kl_t, dim=-1)
-        # )
-        
-
-
-        # prevent exploding KL loss due to very small uncertainties
-
-        
-        # Step 1: compute uncertainty for each
-        uncert_src_t = self.compute_uncertainty(self.t_classifier, src_t_feat)
-        uncert_src_f = self.compute_uncertainty(self.f_classifier, src_f_feat)
-        uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
-        uncert_trg_f = self.compute_uncertainty(self.f_classifier, trg_f_feat)
-
-        uncert_src_f = torch.clamp(uncert_src_f, min=1e-2)
-        uncert_trg_t = torch.clamp(uncert_trg_t, min=1e-2)
-
-        # Step 2: compute KL per sample
-        kl_src = F.kl_div(F.log_softmax(src_t_pred / self.kl_t, dim=-1),
-                          F.softmax(src_f_pred / self.kl_t, dim=-1),
-                          reduction='none').sum(dim=1)  # [B]
-        kl_trg = F.kl_div(F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-                          F.softmax(trg_t_pred / self.kl_t, dim=-1),
-                          reduction='none').sum(dim=1)  # [B]
-
-        # Step 3: weight by uncertainty
         eps = 1e-5
-        # align_s_tf_loss = ((1 / (uncert_src_f + eps)) * kl_src).mean()
-        
+    
         align_s_tf_loss = self.kl(
             F.log_softmax(src_t_pred / self.kl_t, dim=-1),
             F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
         )
-        # align_t_tf_loss = ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
-        beta = self.args.uncertainty_weight  # وزن قابل تنظیم
-        align_t_tf_loss = beta * ((1 / (uncert_trg_t + eps)) * kl_trg).mean()
 
-        
+        kl_src = F.kl_div(
+            F.log_softmax(src_t_pred / self.kl_t, dim=-1),
+            F.softmax(src_f_pred / self.kl_t, dim=-1),
+            reduction='none'
+        ).sum(dim=1)
+
     
-        # -------------------------------
-        # 9) Conditional entropy loss (روی target)
-        # -------------------------------
+        if self.current_epoch < 5:
+            align_t_tf_loss = self.kl(
+                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+                F.softmax(trg_t_pred / self.kl_t, dim=-1)
+            )
+            kl_trg = F.kl_div(
+                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+                F.softmax(trg_t_pred / self.kl_t, dim=-1),
+                reduction='none'
+            ).sum(dim=1)
+            uncert_trg_t = None  # هنوز uncertainty نداریم
+        else:
+            uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
+            uncert_trg_t = torch.clamp(uncert_trg_t, min=1e-2)
+            kl_trg = F.kl_div(
+                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+                F.softmax(trg_t_pred / self.kl_t, dim=-1),
+                reduction='none'
+            ).sum(dim=1)
+            align_t_tf_loss = self.uncertainty_weight * ((1 / (uncert_trg_t + 1e-5)) * kl_trg).mean()
+
+    
+        if torch.rand(1).item() < 0.01:
+            print(f"[Uncertainty DEBUG] Epoch {self.current_epoch} | mean={uncert_trg_t.mean():.4f}, min={uncert_trg_t.min():.4f}, max={uncert_trg_t.max():.4f}")
+    
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
     
-        # -------------------------------
-        # 10) Total loss
-        # -------------------------------
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
-               + self.args.domain_trade_off * domain_loss \
-               + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
-               + self.args.align_t_trade_off * align_t_tf_loss \
-               + self.args.align_s_trade_off * align_s_tf_loss
+            + self.args.domain_trade_off * domain_loss \
+            + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
+            + self.args.align_t_trade_off * align_t_tf_loss \
+            + self.args.align_s_trade_off * align_s_tf_loss
     
-        # -------------------------------
-        # 11) Update feature extractors + graph + classifiers
-        # -------------------------------
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
     
-        # -------------------------------
-        # 12) Return logging info
-        # -------------------------------
+
+            
+        self.idea_logger.log(
+                epoch=self.current_epoch,
+                trg_t_pred=trg_t_pred,
+                kl_src=kl_src,
+                kl_trg=kl_trg,
+                uncert_trg_t=uncert_trg_t if 'uncert_trg_t' in locals() else None,
+                align_t_tf_loss=align_t_tf_loss,
+                align_s_tf_loss=align_s_tf_loss
+        )
+
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
             'Src_f_cls_loss': src_f_cls_loss.item(),
@@ -255,6 +230,8 @@ class ACON(Algorithm):
             'cond_ent_loss_f': entropy_trg_f.item(),
             'domain acc': domain_acc.item()
         }
+
+
     
 
     # Uncertainty-Aware Mutual Learning
