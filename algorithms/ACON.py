@@ -192,9 +192,6 @@ class ACON(Algorithm):
             align_t_tf_loss = self.uncertainty_weight * ((1 / (uncert_trg_t + 1e-5)) * kl_trg).mean()
 
     
-        if torch.rand(1).item() < 0.01:
-            print(f"[Uncertainty DEBUG] Epoch {self.current_epoch} | mean={uncert_trg_t.mean():.4f}, min={uncert_trg_t.min():.4f}, max={uncert_trg_t.max():.4f}")
-    
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
     
