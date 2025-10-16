@@ -183,13 +183,25 @@ class ACON(Algorithm):
             uncert_trg_t = None  # هنوز uncertainty نداریم
         else:
             uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
-            uncert_trg_t = torch.clamp(uncert_trg_t, min=1e-2)
+            eps = 1e-5
+            
+            # مقیاس‌بندی uncertainty
+            scaled_uncert = uncert_trg_t / (uncert_trg_t.max().detach() + eps)
+            
+            # وزن‌دهی با معکوس uncertainty و محدودسازی
+            weight = 1 / (scaled_uncert + eps)
+            weight = torch.clamp(weight, min=0.1, max=10.0)
+            
+            # محاسبه KL
             kl_trg = F.kl_div(
                 F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
                 F.softmax(trg_t_pred / self.kl_t, dim=-1),
                 reduction='none'
             ).sum(dim=1)
-            align_t_tf_loss = self.uncertainty_weight * ((1 / (uncert_trg_t + 1e-5)) * kl_trg).mean()
+            
+            # loss نهایی
+            align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
+            
 
     
         entropy_trg_t = self.criterion_cond(trg_t_pred)
@@ -234,16 +246,20 @@ class ACON(Algorithm):
     # Uncertainty-Aware Mutual Learning
 
     def compute_uncertainty(self, model_fn, x, M=None):
-        """Monte Carlo Dropout uncertainty estimation over model_fn(x)"""
-        M = M or self.mc_passes  # default: 10
+        M = M or self.mc_passes
         preds = []
+    
+        model_fn.train()  # ⬅️ اضافه کن!
+    
         for _ in range(M):
             with torch.no_grad():
                 y = model_fn(x)
                 preds.append(F.softmax(y, dim=1))  # [B, C]
+    
         stacked_preds = torch.stack(preds)  # [M, B, C]
         var = torch.var(stacked_preds, dim=0)  # [B, C]
         return var.mean(dim=1)  # [B]
+    
 
 
     '''return predictions'''

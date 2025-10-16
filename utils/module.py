@@ -59,16 +59,26 @@ class CNN(nn.Module):
 
 
 
-class TemporalClassifierHead(nn.Module):
+# class TemporalClassifierHead(nn.Module):
 
-    def __init__(self, in_dim, num_classes, bias=True):
+#     def __init__(self, in_dim, num_classes, bias=True):
+#         super(TemporalClassifierHead, self).__init__()
+#         self.head = nn.Linear(in_dim, num_classes, bias=bias)
+
+#     def forward(self, x):
+#         predictions = self.head(x)
+#         return predictions
+    
+class TemporalClassifierHead(nn.Module):
+    def __init__(self, in_dim, num_classes, bias=True, dropout_p=0.5):
         super(TemporalClassifierHead, self).__init__()
+        self.dropout = nn.Dropout(p=dropout_p)
         self.head = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x):
-        predictions = self.head(x)
-        return predictions
-    
+        x = self.dropout(x)  # Enables stochasticity
+        return self.head(x)
+
 
 class FrequencyClassifierHead(nn.Module):
 
