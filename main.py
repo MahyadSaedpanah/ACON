@@ -66,7 +66,7 @@ args = parser.parse_args()
 # Override settings for debug mode
 if args.debug:
     args.num_runs = 1
-    args.num_epochs = 5
+    args.num_epochs = 10
     args.start = 0
     args.end = 1
 
