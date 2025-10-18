@@ -10,3 +10,4 @@ venv/
 *.pkl
 *.pickle
 *.xlsx
+*.csv

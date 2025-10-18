@@ -60,7 +60,7 @@ class ACON(Algorithm):
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	        {'params': self.t_classifier.parameters()},
+	          {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
             {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
@@ -169,38 +169,23 @@ class ACON(Algorithm):
             reduction='none'
         ).sum(dim=1)
 
-    
-        if self.current_epoch < 5:
-            align_t_tf_loss = self.kl(
-                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-                F.softmax(trg_t_pred / self.kl_t, dim=-1)
-            )
-            kl_trg = F.kl_div(
-                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-                F.softmax(trg_t_pred / self.kl_t, dim=-1),
-                reduction='none'
-            ).sum(dim=1)
-            uncert_trg_t = None  # هنوز uncertainty نداریم
-        else:
-            uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
-            eps = 1e-5
-            
-            # مقیاس‌بندی uncertainty
-            scaled_uncert = uncert_trg_t / (uncert_trg_t.max().detach() + eps)
-            
-            # وزن‌دهی با معکوس uncertainty و محدودسازی
-            weight = 1 / (scaled_uncert + eps)
-            weight = torch.clamp(weight, min=0.1, max=10.0)
-            
-            # محاسبه KL
-            kl_trg = F.kl_div(
-                F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-                F.softmax(trg_t_pred / self.kl_t, dim=-1),
-                reduction='none'
-            ).sum(dim=1)
-            
-            # loss نهایی
-            align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
+
+        uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
+        eps = 1e-5
+        
+        scaled_uncert = uncert_trg_t / (uncert_trg_t.max().detach() + eps)
+        
+        weight = 1 / (scaled_uncert + eps)
+        weight = torch.clamp(weight, min=0.1, max=10.0)
+        
+        kl_trg = F.kl_div(
+            F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+            F.softmax(trg_t_pred / self.kl_t, dim=-1),
+            reduction='none'
+        ).sum(dim=1)
+        
+        align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
+        
             
 
     
