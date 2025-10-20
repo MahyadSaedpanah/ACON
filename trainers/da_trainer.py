@@ -24,6 +24,8 @@ from algorithms.utils import get_time
 from algorithms.utils import AverageMeter
 from sklearn.metrics import f1_score
 from utils.plot import plot_losses, plot_metrics
+from utils.tsne_visualizer import visualize_tsne
+
 
 torch.backends.cudnn.benchmark = True  
 warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)        
@@ -265,6 +267,9 @@ class da_trainer(object):
                 plot_losses(target_loss_history, self.avg_res_dir, run_id, mode="target")
                 plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id, mode="target")
 
+                #اجرای t-SNE روی target test set
+                tsne_path = os.path.join(self.avg_res_dir, f"tsne_run{run_id}.png")
+                visualize_tsne(self.algorithm, self.trg_test_dl, self.device, save_path=tsne_path)
 
 
 
