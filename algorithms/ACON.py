@@ -136,6 +136,21 @@ class ACON(Algorithm):
     
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
+
+        # contrastive loss
+        with torch.no_grad():
+            probs = F.softmax(trg_t_pred, dim=1)
+            conf, pseudo_labels = probs.max(dim=1)
+            mask = conf > self.args.cl_conf_thresh
+
+
+        if mask.sum() > 0:
+            h_all = torch.cat([h_src, h_trg[mask]], dim=0)
+            labels_all = torch.cat([src_y, pseudo_labels[mask]], dim=0)
+            loss_cl = self.contrastive_loss(h_all, labels_all, temperature=self.args.cl_temp)
+        else:
+            loss_cl = torch.tensor(0.0, device=h_src.device)
+            
         h_concat = torch.cat([h_src, h_trg], dim=0)
     
         disc_prediction = self.domain_classifier(h_concat.detach())
@@ -196,7 +211,8 @@ class ACON(Algorithm):
             + self.args.domain_trade_off * domain_loss \
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
-            + self.args.align_s_trade_off * align_s_tf_loss
+            + self.args.align_s_trade_off * align_s_tf_loss \
+            + self.args.cl_trade_off * loss_cl
     
         self.optimizer.zero_grad()
         loss.backward()
@@ -211,7 +227,8 @@ class ACON(Algorithm):
                 kl_trg=kl_trg,
                 uncert_trg_t=uncert_trg_t if 'uncert_trg_t' in locals() else None,
                 align_t_tf_loss=align_t_tf_loss,
-                align_s_tf_loss=align_s_tf_loss
+                align_s_tf_loss=align_s_tf_loss,
+                # contrastive_loss=loss_cl.item(),
         )
 
         return {
@@ -222,7 +239,8 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'contrastive_loss': loss_cl.item()
         }
 
 
@@ -244,7 +262,31 @@ class ACON(Algorithm):
         stacked_preds = torch.stack(preds)  # [M, B, C]
         var = torch.var(stacked_preds, dim=0)  # [B, C]
         return var.mean(dim=1)  # [B]
-    
+
+
+    # Hybrid Contrastive-Adversarial Learning
+
+    def contrastive_loss(self, h, labels, temperature=0.07):
+        h = F.normalize(h, dim=1)
+        sim_matrix = torch.matmul(h, h.T) / temperature
+
+
+        labels = labels.contiguous().view(-1, 1)
+        mask = torch.eq(labels, labels.T).float().to(h.device)
+
+
+        logits_mask = torch.ones_like(mask) - torch.eye(mask.size(0)).to(h.device)
+        mask = mask * logits_mask
+
+
+        exp_sim = torch.exp(sim_matrix) * logits_mask
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+
+        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + 1e-8)
+        loss = -mean_log_prob_pos.mean()
+        return loss
+
 
 
     '''return predictions'''

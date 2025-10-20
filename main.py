@@ -51,8 +51,13 @@ parser.add_argument('--domain_trade_off', type=float,default=1.0)
 parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
+# uncertainty
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
 parser.add_argument('--mc_passes', type=float, default=10)
+# contrastive
+parser.add_argument('--cl_trade_off', type=float, default=0.1)
+parser.add_argument('--cl_conf_thresh', type=float, default=0.9)
+parser.add_argument('--cl_temp', type=float, default=0.07)
 
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
