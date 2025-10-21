@@ -24,7 +24,7 @@ from algorithms.utils import get_time
 from algorithms.utils import AverageMeter
 from sklearn.metrics import f1_score
 from utils.plot import plot_losses, plot_metrics
-from utils.tsne_visualizer import visualize_tsne
+from utils.contrastive_debug_tool import contrastive_debug
 
 
 torch.backends.cudnn.benchmark = True  
@@ -267,11 +267,16 @@ class da_trainer(object):
                 plot_losses(target_loss_history, self.avg_res_dir, run_id, mode="target")
                 plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id, mode="target")
 
-                #اجرای t-SNE روی target test set
-                tsne_path = os.path.join(self.avg_res_dir, f"tsne_run{run_id}.png")
-                visualize_tsne(self.algorithm, self.trg_test_dl, self.device, save_path=tsne_path)
+                contrastive_debug(
+                    model=self.algorithm,
+                    dataloader=self.trg_test_dl,
+                    device=self.device,
+                    save_dir=os.path.join(self.avg_res_dir, "contrastive_debug"),
+                    run_name=f"tsne_run{run_id}"
+                )
+                
 
-
+                
 
         df_a = self.avg_result(df_a)
         df_s = self.avg_result(df_s)
