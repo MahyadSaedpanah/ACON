@@ -10,6 +10,8 @@ from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
 from utils.idea_logger import IdeaLogger
+from utils.idea_logger_extended import AnalyticalLogger
+
 
 
     
@@ -36,6 +38,8 @@ class ACON(Algorithm):
         # self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
+
+        self.ana_logger = AnalyticalLogger(log_dir=getattr(args, "log_dir", "./analysis_logs"))
 
 
         # --- Graph module (attention + top-k + GCN) ---
@@ -213,6 +217,24 @@ class ACON(Algorithm):
                 align_t_tf_loss=align_t_tf_loss,
                 align_s_tf_loss=align_s_tf_loss
         )
+
+
+        self.ana_logger.log(
+            epoch=self.current_epoch,
+            src_t_pred=src_t_pred,
+            src_f_pred=src_f_pred,
+            trg_t_pred=trg_t_pred,
+            trg_f_pred=trg_f_pred,
+            src_y=src_y,
+            uncert_trg_t=uncert_trg_t,
+            src_t_feat=src_t_feat,
+            src_f_feat=src_f_feat,
+            trg_t_feat=trg_t_feat,
+            trg_f_feat=trg_f_feat,
+            h_src=h_src,
+            h_trg=h_trg
+        )
+        
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
