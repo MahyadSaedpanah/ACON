@@ -6,7 +6,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.loss import ConditionalEntropyLoss
+from utils.loss import ConditionalEntropyLoss, contrastive_loss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
 from utils.idea_logger import IdeaLogger
@@ -141,6 +141,63 @@ class ACON(Algorithm):
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
         h_concat = torch.cat([h_src, h_trg], dim=0)
+
+        # # ----------- Contrastive Learning Preparation -----------
+        # # Source labels
+        # labels_src = src_y
+
+        # # Pseudo-labels for target
+        # pseudo_labels_trg = trg_t_pred.softmax(dim=1).argmax(dim=1)
+
+        # # Confidence filtering
+        # trg_conf = trg_t_pred.softmax(dim=1).max(dim=1)[0]
+        # mask = (trg_conf > self.args.cl_conf_thresh)
+        # filtered_h_trg = h_trg[mask]
+        # filtered_labels_trg = pseudo_labels_trg[mask]
+
+        # # Combine source + confident target features
+        # h_combined = torch.cat([h_src, filtered_h_trg], dim=0)
+        # labels_combined = torch.cat([labels_src, filtered_labels_trg], dim=0)
+
+        # # Contrastive loss
+        # h_combined = F.normalize(h_combined, dim=1)
+        # contrastive_loss_val = contrastive_loss(h_combined, labels_combined, temp=self.args.cl_temp)
+
+        # ======================== Contrastive Learning ========================
+
+        with torch.no_grad():
+            trg_soft = F.softmax(trg_t_pred, dim=1)
+            trg_conf = trg_soft.max(dim=1)[0]
+            trg_pseudo = trg_soft.argmax(dim=1)
+
+            # Adaptive threshold: keep roughly stable sample count
+            mean_conf = trg_conf.mean()
+            adaptive_thresh = max(0.5, mean_conf - 0.1)
+            mask = (trg_conf > adaptive_thresh)
+
+        # اگر نمونه مطمئن نداریم: loss صفر
+        if mask.sum() == 0:
+            contrastive_loss_val = torch.tensor(0.0, device=h_src.device)
+            num_confident_trg = torch.tensor(0, device=h_src.device)
+        else:
+            # Combine source and confident target samples
+            h_combined = torch.cat([h_src, h_trg[mask]], dim=0)
+            y_combined = torch.cat([src_y, trg_pseudo[mask]], dim=0)
+
+            h_combined = F.normalize(h_combined, dim=1)
+
+            contrastive_loss_val = contrastive_loss(
+                h_combined, y_combined,
+                temp=self.args.cl_temp,
+                neg_thresh=0.1
+            )
+
+            num_confident_trg = mask.sum()
+
+        mean_conf_trg = trg_conf.mean()
+
+        # =====================================================================
+
     
         disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
@@ -200,8 +257,9 @@ class ACON(Algorithm):
             + self.args.domain_trade_off * domain_loss \
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
-            + self.args.align_s_trade_off * align_s_tf_loss
-    
+            + self.args.align_s_trade_off * align_s_tf_loss \
+            + self.args.cl_trade_off * contrastive_loss_val
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -215,7 +273,10 @@ class ACON(Algorithm):
                 kl_trg=kl_trg,
                 uncert_trg_t=uncert_trg_t if 'uncert_trg_t' in locals() else None,
                 align_t_tf_loss=align_t_tf_loss,
-                align_s_tf_loss=align_s_tf_loss
+                align_s_tf_loss=align_s_tf_loss,
+                # contrastive_loss=contrastive_loss_val.item(),
+                # num_confident_trg=mask.sum().item(),
+                # mean_conf_trg=trg_conf.mean().item()
         )
 
 
@@ -244,7 +305,12 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'contrastive_loss': float(contrastive_loss_val.item()),
+            'cl_num_confident': int(num_confident_trg.item()),
+            'cl_mean_conf': float(mean_conf_trg.item()),
+            # 'cl_temp': float(self.args.cl_temp),
+            # 'cl_conf_thresh': float(self.args.cl_conf_thresh),
         }
 
 

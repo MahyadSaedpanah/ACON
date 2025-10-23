@@ -54,6 +54,12 @@ parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
 parser.add_argument('--mc_passes', type=float, default=10)
 
+# ======== Contrastive Learning Settings ========
+parser.add_argument('--cl_trade_off', type=float, default=0.01, help='Weight for contrastive loss')
+parser.add_argument('--cl_conf_thresh', type=float, default=0.8, help='Confidence threshold for target pseudo-labels')
+parser.add_argument('--cl_temp', type=float, default=0.3, help='Temperature for contrastive loss')
+
+
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
 
