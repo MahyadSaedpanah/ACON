@@ -211,7 +211,8 @@ class ACON(Algorithm):
         trg_feats = F.normalize(trg_feats, dim=1)
 
         # فقط targetهای با اطمینان بالا
-        mask = trg_conf > 0.7
+        th = getattr(self.args, "cl_conf_thresh", 0.7)
+        mask = trg_conf > th
         if mask.sum() == 0:
             return torch.tensor(0.0, device=device)
 
