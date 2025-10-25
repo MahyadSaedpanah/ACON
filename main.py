@@ -20,7 +20,7 @@ parser.add_argument('--run_description', default='ACON', type=str, help='name of
 parser.add_argument('--da_method', default='ACON', type=str)
 
 # ========= Select the DATASET ==============
-parser.add_argument('--data_path', default='/home/mahyad/projects/ACON/data', type=str, help='Path containing dataset')
+parser.add_argument('--data_path', default='/content/ACON/data', type=str, help='Path containing dataset')
 parser.add_argument('--dataset', default='UCIHAR',type=str)
 
 # ========= Select the BACKBONE ==============
@@ -52,7 +52,15 @@ parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
-parser.add_argument('--mc_passes', type=float, default=10)
+parser.add_argument('--mc_passes', type=float, default=20)
+
+# --- Contrastive Learning Parameters ---
+parser.add_argument('--cl_trade_off', type=float, default=0.02,
+                    help='trade-off weight for contrastive loss')
+parser.add_argument('--cl_temp', type=float, default=0.3,
+                    help='temperature for contrastive loss')
+parser.add_argument('--cl_conf_thresh', type=float, default=0.7,
+                    help='confidence threshold for pseudo-labels in contrastive learning')
 
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
@@ -66,7 +74,7 @@ args = parser.parse_args()
 # Override settings for debug mode
 if args.debug:
     args.num_runs = 1
-    args.num_epochs = 10
+    args.num_epochs = 50
     args.start = 0
     args.end = 1
 
