@@ -54,6 +54,11 @@ parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
 parser.add_argument('--mc_passes', type=float, default=10)
 
+parser.add_argument('--cl_src_trade_off', type=float, default=0.1)
+parser.add_argument('--cl_tgt_trade_off', type=float, default=0.1)
+
+
+
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
 
@@ -66,7 +71,7 @@ args = parser.parse_args()
 # Override settings for debug mode
 if args.debug:
     args.num_runs = 1
-    args.num_epochs = 10
+    args.num_epochs = 50
     args.start = 0
     args.end = 1
 

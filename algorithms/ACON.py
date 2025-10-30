@@ -54,6 +54,11 @@ class ACON(Algorithm):
             self.args.disc_hid_dim
         )
 
+        # === Prototype memory for GC-ACON+ ===
+        self.prototypes = torch.zeros(configs.num_classes, self.graph_module.out_dim).to(device)
+        self.prototype_momentum = 0.9
+
+
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
 
@@ -111,6 +116,74 @@ class ACON(Algorithm):
         a_cls = a[:, :, :self.fft_mode]
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
+
+
+    # =========================================================
+    #     GC-ACON+  Prototype-Guided Contrastive Learning
+    # =========================================================
+
+    def update_prototypes(self, h_src, src_y):
+        """
+        به‌روزرسانی پروتوتایپ‌ها با میانگین متحرک (EMA)
+        h_src: ویژگی‌های گراف منبع [B, D]
+        src_y: برچسب‌های منبع [B]
+        """
+        with torch.no_grad():
+            for c in range(self.prototypes.size(0)):
+                mask = (src_y == c)
+                if mask.sum() == 0:
+                    continue
+                class_feat = h_src[mask].mean(dim=0)
+                self.prototypes[c] = (
+                    self.prototype_momentum * self.prototypes[c]
+                    + (1 - self.prototype_momentum) * class_feat
+                )
+    
+    def graph_contrastive_source(self, h_src, src_y, tau=0.5, margin=0.2):
+        """
+        Margin-based supervised contrastive loss (پایدارتر)
+        """
+        h = F.normalize(h_src, dim=1)
+        sim = torch.matmul(h, h.T)  # cos similarity
+        labels = src_y.contiguous().view(-1, 1)
+        mask_pos = (labels == labels.T).float().to(h.device)
+        mask_neg = 1 - mask_pos
+
+        # فاصله margin برای منفی‌ها
+        pos_term = torch.exp(sim / tau) * mask_pos
+        neg_term = torch.exp(torch.clamp(sim - margin, max=0) / tau) * mask_neg
+
+        pos_sum = pos_term.sum(1)
+        all_sum = (pos_term + neg_term).sum(1)
+        loss = -torch.log((pos_sum + 1e-9) / (all_sum + 1e-9))
+        return loss.mean()
+
+
+    def graph_contrastive_target(self, h_src, h_tgt, src_y, tau=0.7, tau_p=0.2):
+        """
+        Contrastive هدف با pseudo-label نرم از فاصله تا پروتوتایپ‌ها (نسخه پایدار)
+        """
+        h_src = F.normalize(h_src, dim=1)
+        h_tgt = F.normalize(h_tgt, dim=1)
+
+        with torch.no_grad():
+            dist = torch.cdist(h_tgt, self.prototypes)  # [B_t, C]
+            p_soft = F.softmax(-dist / tau_p, dim=1)
+            conf = p_soft.max(dim=1)[0]
+            pseudo_labels = p_soft.argmax(dim=1)
+
+        sim = torch.matmul(h_src, h_tgt.T) / tau
+        log_prob = F.log_softmax(sim, dim=1)
+
+        mask_pos = torch.zeros_like(sim)
+        for i, c in enumerate(src_y):
+            mask_pos[i, pseudo_labels == c] = 1.0
+
+        pos_log_prob = (mask_pos * log_prob).sum(1) / (mask_pos.sum(1) + 1e-9)
+        loss = - (conf * pos_log_prob).mean()
+        return loss
+
+
     
     
     def update(self, src_x, src_y, trg_x):
@@ -137,6 +210,19 @@ class ACON(Algorithm):
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
         h_concat = torch.cat([h_src, h_trg], dim=0)
+
+        # ===========================================
+        # ===   GC-ACON+  Contrastive Components   ===
+        # ===========================================
+        # به‌روزرسانی پروتوتایپ‌ها
+        self.update_prototypes(h_src.detach(), src_y.detach())
+
+        # Contrastive منبع (Supervised)
+        loss_gc_src = self.graph_contrastive_source(h_src, src_y, tau=0.3)
+
+        # Contrastive هدف (Prototype-guided soft pseudo-label)
+        loss_gc_tgt = self.graph_contrastive_target(h_src, h_trg, src_y, tau=0.3, tau_p=0.2)
+
     
         disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
@@ -196,7 +282,9 @@ class ACON(Algorithm):
             + self.args.domain_trade_off * domain_loss \
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
-            + self.args.align_s_trade_off * align_s_tf_loss
+            + self.args.align_s_trade_off * align_s_tf_loss \
+            + self.args.cl_src_trade_off * loss_gc_src + self.args.cl_tgt_trade_off * loss_gc_tgt
+
     
         self.optimizer.zero_grad()
         loss.backward()
@@ -222,7 +310,9 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'GC_src_loss': loss_gc_src.item(),
+            'GC_tgt_loss': loss_gc_tgt.item(),
         }
 
 
