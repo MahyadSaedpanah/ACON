@@ -28,6 +28,8 @@ class ACON(Algorithm):
         self.fft_mode = self.period // 2 + 1
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
+        self.mc_samples = getattr(args, 'mc_samples', 10)
+        self.eps = 1e-6
 
         # model
         self.t_feature_extractor = CNN(configs)
@@ -37,7 +39,7 @@ class ACON(Algorithm):
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
 
 
-        # --- Graph module (attention + top-k + GCN) ---
+        # --- Graph module
         self.graph_module = GraphCorrelationModule(
             t_dim=self.t_feature_extractor.out_dim,
             f_dim=self.f_classifier.linear1.in_features,
@@ -47,7 +49,7 @@ class ACON(Algorithm):
 
 
 
-        # discriminator روی خروجی گراف
+        # discriminator
         self.domain_classifier = Discriminator(
             self.graph_module.out_dim,
             self.args.disc_hid_dim
@@ -55,7 +57,6 @@ class ACON(Algorithm):
 
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
         
-
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
@@ -104,7 +105,49 @@ class ACON(Algorithm):
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
     
+
+    # MC Dropout
+    def mc_pred_and_var(self, x, is_freq):
+        T = self.mc_samples
+
+        self.t_classifier.train()
+        self.f_classifier.train()
+
+        preds = []
+        with torch.no_grad():
+            for _ in range(T):
+                if is_freq:
+                    p, _ = self.f_classifier(x, get_feat=True)
+                else:
+                    p = self.t_classifier(x)
+                preds.append(p)
+
+        self.t_classifier.eval()
+        self.f_classifier.eval()
+
+        preds = torch.stack(preds)
+        mean_pred = preds.mean(0)
+        u = preds.var(0).mean(-1)
+        return mean_pred, u
     
+
+    def kl_loss_weighted(self, pred1, pred2, u1, u2, temp=1.0, eps=1e-6):
+        # نرمال‌سازی دما
+        log_p1 = F.log_softmax(pred1 / temp, dim=-1)
+        p2 = F.softmax(pred2 / temp, dim=-1)
+
+        # وزن: معکوس عدم قطعیت
+        weight = 1.0 / (u1 + u2 + eps)  # [B]
+
+        # KL معمولی
+        kl = F.kl_div(log_p1, p2, reduction='none').sum(-1)  # [B]
+
+        # KL وزن‌دار
+        kl_weighted = (kl * weight).mean()
+
+        return kl_weighted
+
+
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
     
@@ -135,6 +178,14 @@ class ACON(Algorithm):
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)  # [B, num_classes], [B, d_F]
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
     
+        # MC Dropout برای source
+        src_t_pred_mc, u_T_src = self.mc_pred_and_var(src_t_feat, is_freq=False)
+        src_f_pred_mc, u_F_src = self.mc_pred_and_var(src_a_cls, is_freq=True)
+        
+        # MC Dropout برای target
+        trg_t_pred_mc, u_T_trg = self.mc_pred_and_var(trg_t_feat, is_freq=False)
+        trg_f_pred_mc, u_F_trg = self.mc_pred_and_var(trg_a_cls, is_freq=True)
+
         # -------------------------------
         # 4) گراف (AttentionTopK + GCN)
         # -------------------------------
@@ -172,15 +223,22 @@ class ACON(Algorithm):
         # -------------------------------
         # 8) Alignment losses
         # -------------------------------
-        align_s_tf_loss = self.kl(
-            F.log_softmax(src_t_pred / self.kl_t, dim=-1),
-            F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
+        # align_s_tf_loss = self.kl(
+        #     F.log_softmax(src_t_pred / self.kl_t, dim=-1),
+        #     F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
+        # )
+        # align_t_tf_loss = self.kl(
+        #     F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
+        #     F.softmax(trg_t_pred / self.kl_t, dim=-1)
+        # )
+
+        align_s_tf_loss = self.kl_loss_weighted(
+            src_t_pred_mc, src_f_pred_mc, u_T_src, u_F_src, temp=self.kl_t
         )
-        align_t_tf_loss = self.kl(
-            F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-            F.softmax(trg_t_pred / self.kl_t, dim=-1)
+        align_t_tf_loss = self.kl_loss_weighted(
+            trg_t_pred_mc, trg_f_pred_mc, u_T_trg, u_F_trg, temp=self.kl_t
         )
-    
+
         # -------------------------------
         # 9) Conditional entropy loss (روی target)
         # -------------------------------
@@ -214,7 +272,11 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'u_T_src_avg': u_T_src.mean().item(),   # عدم قطعیت زمانی (source)
+            'u_F_src_avg': u_F_src.mean().item(),   # عدم قطعیت فرکانسی (source)
+            'u_T_trg_avg': u_T_trg.mean().item(),   # عدم قطعیت زمانی (target)
+            'u_F_trg_avg': u_F_trg.mean().item(),   # عدم قطعیت فرکانسی (target)
         }
     
     

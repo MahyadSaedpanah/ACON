@@ -52,6 +52,8 @@ parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
 
+parser.add_argument('--mc_samples', type=int, default=10, help='Number of Monte Carlo samples for uncertainty-aware mutual learning')
+
 # ========= Debug Mode ===============
 parser.add_argument('--debug', action='store_true', help='Run in debug mode (lightweight settings)')
 

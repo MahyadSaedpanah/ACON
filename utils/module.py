@@ -61,27 +61,34 @@ class CNN(nn.Module):
 
 class TemporalClassifierHead(nn.Module):
 
-    def __init__(self, in_dim, num_classes, bias=True):
+    def __init__(self, in_dim, num_classes, bias=True, dropout=0.5):
         super(TemporalClassifierHead, self).__init__()
+        self.dropout = nn.Dropout(dropout)
         self.head = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x):
+        x = self.dropout(x)
         predictions = self.head(x)
         return predictions
     
 
 class FrequencyClassifierHead(nn.Module):
 
-    def __init__(self, in_dim, num_classes, bias=True):
+    def __init__(self, in_dim, num_classes, bias=True, dropout=0.5):
         super(FrequencyClassifierHead, self).__init__()
         self.linear1 = nn.Linear(in_dim, in_dim)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x, get_feat=False):
-        x = self.linear1(x)
-        predictions = self.linear2(x)
+        feat = self.linear1(x)
+        feat = self.relu(feat)
+        feat = self.dropout(feat)
+        predictions = self.linear2(feat)
+
         if get_feat:
-            return predictions, x
+            return predictions, feat
         else:
             return predictions
     
