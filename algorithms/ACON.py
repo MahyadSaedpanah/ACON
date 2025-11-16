@@ -29,8 +29,8 @@ class ACON(Algorithm):
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
         self.mc_passes = getattr(args, 'mc_passes', 10)
-        self.uncertainty_weight = getattr(args, 'uncertainty_weight', 1.0)
-        self.eps = 1e-6
+        self.unc_warmup_epochs = getattr(args, 'unc_warmup_epochs', 20)
+        self.eps = 1e-8
 
         # model
         self.t_feature_extractor = CNN(configs)
@@ -186,21 +186,18 @@ class ACON(Algorithm):
         u_T_trg = self.compute_uncertainty(self.t_classifier, trg_t_feat, M=self.mc_passes, is_freq=False)
         u_F_trg = self.compute_uncertainty(self.f_classifier, trg_a_cls, M=self.mc_passes, is_freq=True)
 
-        # --- 7. وزن‌دهی هوشمند (scaling + clamp) ---
-        eps = 1e-5
-        max_u_T = u_T_trg.max().detach() + eps
-        max_u_F = u_F_trg.max().detach() + eps
+        # --- 7. ترکیب محافظه‌کارانه (max) ---
+        u_fused = torch.max(u_T_trg, u_F_trg)  # [B]
 
-        scaled_u_T = u_T_trg / max_u_T
-        scaled_u_F = u_F_trg / max_u_F
+        # --- 8. نرمال‌سازی در batch ---
+        u_max = u_fused.max().detach()
+        scaled_u = u_fused / (u_max + self.eps)
 
-        weight_T = 1.0 / (scaled_u_T + eps)
-        weight_F = 1.0 / (scaled_u_F + eps)
+        # --- 9. وزن‌دهی هوشمند + پایداری ---
+        inv_weight = torch.clamp(1.0 / (scaled_u + self.eps), min=0.1, max=10.0)
+        stability_factor = torch.exp(-3.0 * scaled_u)  # وقتی u بالا → KL خاموش
 
-        weight_T = torch.clamp(weight_T, min=0.1, max=10.0)
-        weight_F = torch.clamp(weight_F, min=0.1, max=10.0)
-
-        # --- 8. KL وزن‌دار در target (دو طرفه) ---
+        # --- 10. KL دو طرفه ---
         kl_T_to_F = F.kl_div(
             F.log_softmax(trg_t_pred / self.kl_t, dim=-1),
             F.softmax(trg_f_pred / self.kl_t, dim=-1),
@@ -213,9 +210,15 @@ class ACON(Algorithm):
             reduction='none'
         ).sum(-1)
 
-        align_t_loss = self.uncertainty_weight * (
-            (weight_T * kl_T_to_F).mean() + 
-            (weight_F * kl_F_to_T).mean()
+        # --- 11. Adaptive scheduling ---
+        current_epoch = getattr(self, 'current_epoch', 0)
+        warmup_ratio = min(current_epoch / self.unc_warmup_epochs, 1.0)
+        adaptive_weight = self.uncertainty_weight * warmup_ratio
+
+        # --- 12. KL نهایی ---
+        align_t_loss = adaptive_weight * (
+            (stability_factor * inv_weight * kl_T_to_F).mean() +
+            (stability_factor * inv_weight * kl_F_to_T).mean()
         )
 
         # --- 9. Entropy ---

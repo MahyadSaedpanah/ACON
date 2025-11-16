@@ -13,6 +13,6 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --align_s_trade_off 1 \
  --kl_t 2.0 \
  --mc_passes 20 \
- --uncertainty_weight 0.5 \
- --debug
-#  --device cuda \
+ --uncertainty_weight 1.0 \
+ --unc_warmup_epochs 20 \
+ --device cuda \
