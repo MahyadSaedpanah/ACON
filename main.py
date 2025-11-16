@@ -55,7 +55,7 @@ parser.add_argument('--cls_trade_off', type=float,default=1.0)
 # ========= Uncertainty ===============
 parser.add_argument('--mc_passes', type=int, default=10)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
-parser.add_argument('--unc_warmup_epochs', type=int, default=1.0)
+parser.add_argument('--unc_warmup_epochs', type=int, default=20)
 
 
 
