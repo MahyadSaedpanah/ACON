@@ -29,6 +29,7 @@ class ACON(Algorithm):
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
         self.mc_passes = getattr(args, 'mc_passes', 10)
+        parser.add_argument('--uncertainty_weight', type=float, default=1.0)
         self.unc_warmup_epochs = getattr(args, 'unc_warmup_epochs', 20)
         self.eps = 1e-8
 
