@@ -64,7 +64,7 @@ class ACON(Algorithm):
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	        {'params': self.t_classifier.parameters()},
+	          {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
             {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
@@ -209,8 +209,8 @@ class ACON(Algorithm):
         u_max = u_fused.max().detach()
         scaled_u = u_fused / (u_max + self.eps)
 
-        inv_weight = torch.clamp(1.0 / (scaled_u + self.eps), min=0.1, max=5.0)
-        stability_factor = torch.exp(-0.5 * scaled_u)
+        inv_weight = torch.clamp(1.0 / (scaled_u + self.eps), min=0.1, max=2.0)
+        stability_factor = torch.exp(-0.1 * scaled_u)
 
         kl_T_to_F = F.kl_div(
             F.log_softmax(trg_t_pred / self.kl_t, dim=-1),
@@ -236,6 +236,21 @@ class ACON(Algorithm):
             (stability_factor * inv_weight * kl_T_to_F).mean() +
             (stability_factor * inv_weight * kl_F_to_T).mean()
         )
+
+        # --- DEBUG: بررسی مقادیر کلیدی ---
+        # if current_epoch % 10 == 0 or align_t_tf_loss.item() == 0:  # هر 5 ایپاک یا وقتی صفره
+        #     print(f"\n[DEBUG Epoch {current_epoch}] UNCERTAINTY & KL ANALYSIS")
+        #     print(f"  u_T_trg: mean={u_T_trg.mean().item():.6f}, min={u_T_trg.min().item():.6f}, max={u_T_trg.max().item():.6f}")
+        #     print(f"  u_F_trg: mean={u_F_trg.mean().item():.6f}, min={u_F_trg.min().item():.6f}, max={u_F_trg.max().item():.6f}")
+        #     print(f"  u_fused: mean={u_fused.mean().item():.6f}, max={u_max.item():.6f}")
+        #     print(f"  scaled_u: mean={scaled_u.mean().item():.6f}")
+        #     print(f"  inv_weight: mean={inv_weight.mean().item():.6f}, min={inv_weight.min().item():.6f}, max={inv_weight.max().item():.6f}")
+        #     print(f"  stability_factor: mean={stability_factor.mean().item():.6f}")
+        #     print(f"  kl_T_to_F: mean={kl_T_to_F.mean().item():.6f}, max={kl_T_to_F.max().item():.6f}")
+        #     print(f"  kl_F_to_T: mean={kl_F_to_T.mean().item():.6f}, max={kl_F_to_T.max().item():.6f}")
+        #     print(f"  adaptive_weight: {adaptive_weight:.6f}")
+        #     print(f"  align_t_tf_loss: {align_t_tf_loss.item():.6f}")
+        #     print("  " + "-"*60 + "\n")
     
         # -------------------------------
         # 9) Conditional entropy loss (روی target)
@@ -306,6 +321,7 @@ class ACON(Algorithm):
     def get_domain_acc(self, pred, label):
         pred = torch.argmax(pred, dim=1)
         res = torch.sum(torch.eq(pred, label)) / label.size(0)
+        
         return res
 
 
