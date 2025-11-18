@@ -218,8 +218,8 @@ class ACON(Algorithm):
         ).sum(-1)
 
         # هر شاخه فقط وقتی مطمئن باشه (u پایین باشه) اجازه کمک داره
-        weight_T = torch.clamp(3.0 / (u_T_trg + 0.5), min=0.1, max=3.0)  # T مطمئن → وزن بالا
-        weight_F = torch.clamp(3.0 / (u_F_trg + 0.5), min=0.1, max=3.0)  # F مطمئن → وزن بالا
+        weight_T = torch.clamp(2.0 / (u_T_trg + 0.8), min=0.05, max=2.0)
+        weight_F = torch.clamp(2.0 / (u_F_trg + 0.8), min=0.05, max=2.0)
 
         current_epoch = getattr(self, 'current_epoch', 0)
         warmup_ratio = min(current_epoch / self.unc_warmup_epochs, 1.0)
