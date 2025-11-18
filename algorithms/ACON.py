@@ -109,24 +109,23 @@ class ACON(Algorithm):
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
     
-    def compute_uncertainty(self, x, M=None):
+    def compute_uncertainty(self, model_fn, x, M=None, is_freq=False):
         M = M or self.mc_passes
-        self.t_feature_extractor.train()   # خیلی مهمه!
-        self.t_classifier.train()
+        model_fn.train()  # Dropout فعال باشه
 
         preds = []
         with torch.no_grad():
             for _ in range(M):
-                feat = self.t_feature_extractor(x)
-                pred = self.t_classifier(feat)
-                preds.append(pred)
+                if is_freq:
+                    p, _ = model_fn(x, get_feat=True)
+                else:
+                    p = model_fn(x)
+                preds.append(p)  # logits خام
 
-        self.t_feature_extractor.eval()
-        self.t_classifier.eval()
-
+        model_fn.eval()
         stacked = torch.stack(preds)           # [M, B, C]
         var = torch.var(stacked, dim=0)        # [B, C]
-        return var.mean(dim=1)                 # [B]
+        return var.mean(dim=1)                 # [B] → عدم قطعیت
     
     
     def update(self, src_x, src_y, trg_x):
@@ -202,8 +201,8 @@ class ACON(Algorithm):
         )
 
         # فقط عدم قطعیت شاخه زمانی رو حساب می‌کنیم (چون معلم ماست)
-        u_T_trg = self.compute_uncertainty(trg_x, M=self.mc_passes)
-        
+        u_T_trg = self.compute_uncertainty(self.t_classifier, trg_t_feat, M=self.mc_passes)
+
         # نرمالایز کردن عدم قطعیت (خیلی مهمه!)
         u_normalized = u_T_trg / (u_T_trg.max().detach() + 1e-8)
 
