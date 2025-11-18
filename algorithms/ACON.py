@@ -29,8 +29,8 @@ class ACON(Algorithm):
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
 
-        self.mc_passes = getattr(args, 'mc_passes', 10)
-        self.unc_warmup_epochs = getattr(args, 'unc_warmup_epochs', 20)
+        self.mc_passes = getattr(args, 'mc_passes', 15)
+        self.unc_warmup_epochs = getattr(args, 'unc_warmup_epochs', 10)
         self.uncertainty_weight = getattr(args, 'uncertainty_weight', 1.0)
         self.eps = 1e-8
 
@@ -193,77 +193,43 @@ class ACON(Algorithm):
         src_f_cls_loss = self.cross_entropy(src_f_pred.squeeze(), src_y)
     
         # -------------------------------
-        # 8) Alignment losses
+        # 8) TempGuide: Temporal-Guided Uncertainty-Weighted Alignment
         # -------------------------------
         align_s_tf_loss = self.kl(
             F.log_softmax(src_t_pred / self.kl_t, dim=-1),
             F.softmax(src_f_pred / self.kl_t, dim=-1) + 1e-5
         )
-        
-        # Uncertainty in Target on T and F
-        u_T_trg = self.compute_uncertainty(self.t_classifier, trg_t_feat, M=self.mc_passes, is_freq=False)
-        u_F_trg = self.compute_uncertainty(self.f_classifier, trg_a_cls, M=self.mc_passes, is_freq=True)
 
-        # روش جهت‌دار: فقط شاخه مطمئن به نامطمئن کمک کنه
-        kl_T_to_F = F.kl_div(
-            F.log_softmax(trg_t_pred / self.kl_t, dim=-1),
-            F.softmax(trg_f_pred.detach() / self.kl_t, dim=-1) + 1e-8,
+        # فقط عدم قطعیت شاخه زمانی رو حساب می‌کنیم (چون معلم ماست)
+        u_T_trg = self.compute_uncertainty(self.t_classifier, trg_t_feat, M=self.mc_passes)
+
+        # نرمالایز کردن عدم قطعیت (خیلی مهمه!)
+        u_normalized = u_T_trg / (u_T_trg.max().detach() + 1e-8)
+
+        # وزن معکوس: هرچه u_T کمتر → وزن بیشتر (یعنی با اطمینان بیشتری درس بده)
+        inv_weight = torch.clamp(1.0 / (u_normalized + 1e-6), min=0.1, max=8.0)
+
+        # فقط شاخه زمانی به شاخه فرکانسی درس می‌ده (F شاگرد است)
+        kl_temp_guide = F.kl_div(
+            F.log_softmax(trg_f_pred / self.kl_t, dim=-1),           # شاگرد: فرکانسی
+            F.softmax(trg_t_pred / self.kl_t, dim=-1),               # معلم: زمانی (detach نداره چون معلم درسته)
             reduction='none'
-        ).sum(-1)
+        ).sum(dim=1)
 
-        kl_F_to_T = F.kl_div(
-            F.log_softmax(trg_f_pred / self.kl_t, dim=-1),
-            F.softmax(trg_t_pred.detach() / self.kl_t, dim=-1) + 1e-8,
-            reduction='none'
-        ).sum(-1)
-
-        # هر شاخه فقط وقتی مطمئن باشه (u پایین باشه) اجازه کمک داره
-        weight_T = torch.clamp(2.0 / (u_T_trg + 0.8), min=0.05, max=2.0)
-        weight_F = torch.clamp(2.0 / (u_F_trg + 0.8), min=0.05, max=2.0)
-
+        # وزن‌دهی با اطمینان شاخه زمانی + warmup
         current_epoch = getattr(self, 'current_epoch', 0)
         warmup_ratio = min(current_epoch / self.unc_warmup_epochs, 1.0)
-        adaptive_weight = self.uncertainty_weight * warmup_ratio
+        final_weight = self.uncertainty_weight * warmup_ratio
 
-        align_t_tf_loss = adaptive_weight * (
-            (weight_T * kl_T_to_F).mean() + 
-            (weight_F * kl_F_to_T).mean()
-        )
+        align_t_tf_loss = final_weight * (inv_weight * kl_temp_guide).mean()
 
-        # --- DEBUG: بررسی مقادیر کلیدی ---
-        # --- DEBUG جدید: مخصوص DUAML (Directional Uncertainty-Aware Mutual Learning) ---
-        # if current_epoch % 10 == 0 or align_t_tf_loss.item() < 1e-5:
-        #     print(f"\n[DEBUG Epoch {current_epoch}] DUAML ANALYSIS")
-        #     print(f"  u_T_trg (Temporal uncertainty):  mean={u_T_trg.mean().item():.6f}, min={u_T_trg.min().item():.6f}, max={u_T_trg.max().item():.6f}")
-        #     print(f"  u_F_trg (Frequency uncertainty): mean={u_F_trg.mean().item():.6f}, min={u_F_trg.min().item():.6f}, max={u_F_trg.max().item():.6f}")
-            
-        #     # وزن‌های جهت‌دار
-        #     print(f"  weight_T (T → F teaching strength): mean={weight_T.mean().item():.6f}, min={weight_T.min().item():.6f}, max={weight_T.max().item():.6f}")
-        #     print(f"  weight_F (F → T teaching strength): mean={weight_F.mean().item():.6f}, min={weight_F.min().item():.6f}, max={weight_F.max().item():.6f}")
-            
-        #     # KL خام قبل از وزن‌دهی
-        #     print(f"  kl_T_to_F (raw divergence T→F):   mean={kl_T_to_F.mean().item():.6f}, max={kl_T_to_F.max().item():.6f}")
-        #     print(f"  kl_F_to_T (raw divergence F→T):   mean={kl_F_to_T.mean().item():.6f}, max={kl_F_to_T.max().item():.6f}")
-            
-        #     # لاس نهایی
-        #     print(f"  adaptive_weight (warmup):         {adaptive_weight:.6f}")
-        #     print(f"  align_t_tf_loss (final):          {align_t_tf_loss.item():.6f}")
-            
-        #     # تحلیل هوشمندانه خودکار (این خط‌ها رو هم اضافه کن!)
-        #     active_T = (weight_T > 1.0).float().mean().item()
-        #     active_F = (weight_F > 1.0).float().mean().item()
-        #     print(f"  → Active Teaching Ratio: T→F: {active_T*100:5.1f}%  |  F→T: {active_F*100:5.1f}%")
-            
-        #     if active_T > 0.7:
-        #         print(f"  → Temporal branch is DOMINANT teacher")
-        #     elif active_F > 0.7:
-        #         print(f"  → Frequency branch is DOMINANT teacher")
-        #     elif active_T < 0.3 and active_F < 0.3:
-        #         print(f"  → Both branches are uncertain → minimal teaching (safe mode)")
-        #     else:
-        #         print(f"  → Balanced mutual teaching")
-                
-        #     print("  " + "-"*70 + "\n")
+        # --- DEBUG اختیاری (حذفش کن اگه نمی‌خوای) ---
+        if current_epoch % 20 == 0:
+            print(f"[TempGuide Epoch {current_epoch}] "
+                f"u_T_mean={u_T_trg.mean():.4f}, "
+                f"inv_weight_mean={inv_weight.mean():.3f}, "
+                f"align_loss={align_t_tf_loss.item():.4f}")
+
     
         # -------------------------------
         # 9) Conditional entropy loss (روی target)
