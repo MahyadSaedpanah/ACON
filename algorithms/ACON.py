@@ -55,15 +55,33 @@ class ACON(Algorithm):
         )
 
         self.avg_pooling = nn.AdaptiveAvgPool1d(self.avg_mode)
+
+        # --- Projection heads for contrastive learning ---
+        self.t_projector = nn.Sequential(
+            nn.Linear(self.t_feature_extractor.out_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
+
+        freq_flat_dim = configs.input_channels * self.fft_mode
+
+        self.f_projector = nn.Sequential(
+            nn.Linear(freq_flat_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
+
         
 
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	          {'params': self.t_classifier.parameters()},
+	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
+            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
+            {'params': self.t_projector.parameters()},
+            {'params': self.f_projector.parameters()}
             ],
             lr=args.lr,
             weight_decay=args.weight_decay
@@ -80,6 +98,7 @@ class ACON(Algorithm):
 
         self.mc_passes = getattr(args, "mc_passes", 10)
         self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
+        
 
         self.idea_logger = IdeaLogger(log_dir=getattr(args, "log_dir", "."))
 
@@ -111,6 +130,18 @@ class ACON(Algorithm):
         a_cls = a[:, :, :self.fft_mode]
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
+
+
+    # SigLIP loss
+    def siglip_loss(self, anchor, positive, temperature=0.3):
+        anchor = F.normalize(anchor, dim=-1)
+        positive = F.normalize(positive, dim=-1)
+        sim = torch.matmul(anchor, positive.T) / temperature
+        labels = torch.arange(anchor.size(0), device=anchor.device)
+        loss_i2p = F.cross_entropy(sim, labels)
+        loss_p2i = F.cross_entropy(sim.T, labels)
+        return (loss_i2p + loss_p2i) / 2
+
     
     
     def update(self, src_x, src_y, trg_x):
@@ -133,6 +164,9 @@ class ACON(Algorithm):
     
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
+
+        src_f_contrast = src_f_feat  # این همون [B, C*fft_mode] هست → درست برای projector
+        trg_f_contrast = trg_f_feat
     
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
@@ -186,17 +220,28 @@ class ACON(Algorithm):
         
         align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
         
-            
-
     
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
+
+
+        # SigLIP Contrastive Loss
+        src_t_proj = F.normalize(self.t_projector(src_t_feat), dim=-1)
+        trg_t_proj = F.normalize(self.t_projector(trg_t_feat), dim=-1)
+        src_f_proj = F.normalize(self.f_projector(src_f_contrast), dim=-1)   # ← دقیقاً همون src_f_feat که به گراف می‌ره!
+        trg_f_proj = F.normalize(self.f_projector(trg_f_contrast), dim=-1)   # ← دقیقاً همون trg_f_feat که به گراف می‌ره!
+    
+        L_src_contrastive = self.siglip_loss(src_f_proj, src_t_proj, temperature=0.4)
+        L_tgt_contrastive = self.siglip_loss(trg_t_proj, trg_f_proj, temperature=0.1)
+        contrastive_loss = L_src_contrastive + 0.7 * L_tgt_contrastive
+
     
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
             + self.args.domain_trade_off * domain_loss \
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
-            + self.args.align_s_trade_off * align_s_tf_loss
+            + self.args.align_s_trade_off * align_s_tf_loss \
+            + self.args.contrastive_trade_off * contrastive_loss
     
         self.optimizer.zero_grad()
         loss.backward()
@@ -222,9 +267,9 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'contrastive_loss': contrastive_loss.item()
         }
-
 
     
 

@@ -53,6 +53,8 @@ parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
 parser.add_argument('--mc_passes', type=float, default=10)
+parser.add_argument('--contrastive_trade_off', type=float, default=1.0)
+
 
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
