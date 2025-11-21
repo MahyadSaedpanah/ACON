@@ -76,7 +76,7 @@ class ACON(Algorithm):
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	        {'params': self.t_classifier.parameters()},
+	          {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
             {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
@@ -133,14 +133,29 @@ class ACON(Algorithm):
 
 
     # SigLIP loss
-    def siglip_loss(self, anchor, positive, temperature=0.3):
+    def siglip_loss(self, anchor, positive, temperature=0.3, bias=0.0):
+        """
+        True SigLIP loss: sigmoid-based contrastive learning.
+        Uses binary cross-entropy with +1/-1 labels (not 0/1).
+        """
         anchor = F.normalize(anchor, dim=-1)
         positive = F.normalize(positive, dim=-1)
-        sim = torch.matmul(anchor, positive.T) / temperature
-        labels = torch.arange(anchor.size(0), device=anchor.device)
-        loss_i2p = F.cross_entropy(sim, labels)
-        loss_p2i = F.cross_entropy(sim.T, labels)
-        return (loss_i2p + loss_p2i) / 2
+        
+        # Similarity matrix [B, B]
+        logits = torch.matmul(anchor, positive.T) / temperature + bias
+        
+        # Labels: +1 for diagonal (positive pairs), -1 for off-diagonal (negatives)
+        B = logits.size(0)
+        labels = 2 * torch.eye(B, device=logits.device) - 1  # [B, B]: diagonal=1, off-diagonal=-1
+        
+        # SigLIP loss: -log(sigmoid(labels * logits))
+        # این معادل است با: positive → -log(sigmoid(logits)), negative → -log(sigmoid(-logits))
+        loss_i2j = -F.logsigmoid(labels * logits).mean()
+        
+        # دوطرفه: j→i (transpose)
+        loss_j2i = -F.logsigmoid(labels * logits.T).mean()
+        
+        return (loss_i2j + loss_j2i) / 2
 
     
     
@@ -231,9 +246,9 @@ class ACON(Algorithm):
         src_f_proj = F.normalize(self.f_projector(src_f_contrast), dim=-1)   # ← دقیقاً همون src_f_feat که به گراف می‌ره!
         trg_f_proj = F.normalize(self.f_projector(trg_f_contrast), dim=-1)   # ← دقیقاً همون trg_f_feat که به گراف می‌ره!
     
-        L_src_contrastive = self.siglip_loss(src_f_proj, src_t_proj, temperature=0.4)
-        L_tgt_contrastive = self.siglip_loss(trg_t_proj, trg_f_proj, temperature=0.1)
-        contrastive_loss = L_src_contrastive + 0.7 * L_tgt_contrastive
+        L_src_contrastive = self.siglip_loss(src_f_proj, src_t_proj, temperature=self.args.c_src_temp)
+        L_tgt_contrastive = self.siglip_loss(trg_t_proj, trg_f_proj, temperature=self.args.c_trg_temp)
+        contrastive_loss = L_src_contrastive + 1.0 * L_tgt_contrastive
 
     
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
@@ -258,6 +273,24 @@ class ACON(Algorithm):
                 align_t_tf_loss=align_t_tf_loss,
                 align_s_tf_loss=align_s_tf_loss
         )
+
+        # Contrastive log
+                # === TARGET DOMAIN ANALYTICS (هر 10 epoch یک بار، بدون هیچ هزینه‌ای) ===
+                # === SOURCE + TARGET DOMAIN ANALYTICS (هر 10 epoch یک بار) ===
+        if (self.current_epoch + 1) % 10 == 0 or self.current_epoch == 0:
+            with torch.no_grad():
+                # Source similarity (F→T)
+                src_sim = F.cosine_similarity(src_f_proj, src_t_proj).mean().item()
+                # Target similarity (T→F) — روی batch فعلی target
+                trg_sim = F.cosine_similarity(trg_f_proj, trg_t_proj).mean().item()
+
+            print(f"\n>>> ANALYTICS @ Epoch {self.current_epoch + 1}")
+            print(f"    Source Positive Similarity (F→T): {src_sim:.4f}")
+            print(f"    Target Positive Similarity (T→F): {trg_sim:.4f}   ← این عدد مهمه!")
+            if trg_sim > 0.85:
+                print(f"    TRANSFERABILITY ACHIEVED! (Target sim = {trg_sim:.4f})")
+            print("-" * 80)
+
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
