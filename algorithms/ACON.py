@@ -71,7 +71,8 @@ class ACON(Algorithm):
             nn.Linear(256, 128)
         )
 
-        self.siglip_bias = nn.Parameter(torch.tensor(0.0))  # learnable bias for SigLIP
+        # self.siglip_bias = nn.Parameter(torch.tensor(0.0))  # learnable bias for SigLIP
+        self.siglip_bias = nn.Parameter(torch.tensor(-10.0))
 
         
 
@@ -136,62 +137,53 @@ class ACON(Algorithm):
 
 
     # SigLIP loss
-    # def siglip_loss(self, anchor, positive, temperature):
-    #     """
-    #     True SigLIP loss: sigmoid-based contrastive learning.
-    #     Uses binary cross-entropy with +1/-1 labels (not 0/1).
-    #     """
-    #     anchor = F.normalize(anchor, dim=-1)
-    #     positive = F.normalize(positive, dim=-1)
-        
-    #     # Similarity matrix [B, B]
-    #     logits = torch.matmul(anchor, positive.T) / temperature + self.siglip_bias
-        
-    #     # Labels: +1 for diagonal (positive pairs), -1 for off-diagonal (negatives)
-    #     B = logits.size(0)
-    #     labels = 2 * torch.eye(B, device=logits.device) - 1  # [B, B]: diagonal=1, off-diagonal=-1
-        
-    #     # SigLIP loss: -log(sigmoid(labels * logits))
-    #     # این معادل است با: positive → -log(sigmoid(logits)), negative → -log(sigmoid(-logits))
-    #     loss_i2j = -F.logsigmoid(labels * logits).mean()
-        
-    #     # دوطرفه: j→i (transpose)
-    #     loss_j2i = -F.logsigmoid(labels * logits.T).mean()
-        
-    #     return (loss_i2j + loss_j2i) / 2
-
-    def siglip_loss(self, anchor, positive, temperature=1.0):
+    def siglip_loss(self, anchor, positive, temperature):
         """
-        Stable SigLIP loss (Google variant)
-        anchor: [B, D]
-        positive: [B, D]
+        True SigLIP loss: sigmoid-based contrastive learning.
+        Uses binary cross-entropy with +1/-1 labels (not 0/1).
         """
+        anchor = F.normalize(anchor, dim=-1)
+        positive = F.normalize(positive, dim=-1)
+        
+        # Similarity matrix [B, B]
+        logits = torch.matmul(anchor, positive.T) / temperature + self.siglip_bias
+        
+        # Labels: +1 for diagonal (positive pairs), -1 for off-diagonal (negatives)
+        B = logits.size(0)
+        labels = 2 * torch.eye(B, device=logits.device) - 1  # [B, B]: diagonal=1, off-diagonal=-1
+        
+        # SigLIP loss: -log(sigmoid(labels * logits))
+        # این معادل است با: positive → -log(sigmoid(logits)), negative → -log(sigmoid(-logits))
+        loss_i2j = -F.logsigmoid(labels * logits).mean()
+        
+        # دوطرفه: j→i (transpose)
+        loss_j2i = -F.logsigmoid(labels * logits.T).mean()
+        
+        return (loss_i2j + loss_j2i) / 2
 
-        # normalize
+
+
+    def siglip_loss(self, anchor, positive, temperature, bias):
+        # L2 normalize
         anchor = F.normalize(anchor, dim=-1)
         positive = F.normalize(positive, dim=-1)
 
-        # similarity matrix
-        logits = torch.matmul(anchor, positive.T) / temperature
-        logits = logits + self.siglip_bias  # learnable bias
+        B = anchor.size(0)
 
-        B = logits.size(0)
+        # Similarity matrix
+        logits = (anchor @ positive.t()) * temperature + bias
 
-        # -----------------
-        # positive loss
-        # -----------------
-        pos_logits = logits.diag()   # sim(anchor_i, positive_i)
-        loss_pos = -F.logsigmoid(pos_logits).mean()
+        # Labels: +1 diag, -1 others
+        labels = 2.0 * torch.eye(B, device=logits.device) - 1.0
 
-        # -----------------
-        # negative loss
-        # -----------------
-        # mask diagonal to remove positives from negatives
-        neg_logits = logits - torch.eye(B, device=logits.device) * 1e9
-        loss_neg = -F.logsigmoid(-neg_logits).mean()
+        # --- i → j ---
+        loss_i2j = -F.logsigmoid(labels * logits).mean()
 
-        # final combined
-        return (loss_pos + loss_neg) / 2
+        # --- j → i ---
+        loss_j2i = -F.logsigmoid(labels * logits.t()).mean()
+
+        return 0.5 * (loss_i2j + loss_j2i)
+
 
     
     
@@ -282,15 +274,14 @@ class ACON(Algorithm):
         src_f_proj = self.f_projector(src_f_contrast)
         trg_f_proj = self.f_projector(trg_f_contrast)
 
-        # L_src_contrastive = self.siglip_loss(src_f_proj, src_t_proj, temperature=self.args.c_src_temp)
-        # L_tgt_contrastive = self.siglip_loss(trg_t_proj, trg_f_proj, temperature=self.args.c_trg_temp)
 
         # SOURCE DOMAIN: Frequency → Temporal (F → T)
         # → frequency discriminative است → به temporal کمک کنه تا discriminability بگیره
         L_src_contrastive = self.siglip_loss(
             anchor=src_f_proj,      # Frequency as anchor (discriminative)
             positive=src_t_proj,    # Temporal as positive
-            temperature=self.args.c_src_temp  # 0.9 ~ 1.0 (ضعیف‌تر)
+            temperature=self.args.c_src_temp,  # 0.9 ~ 1.0 (ضعیف‌تر)
+            bias=self.siglip_bias
         )
 
         # TARGET DOMAIN: Temporal → Frequency (T → F)
@@ -298,7 +289,8 @@ class ACON(Algorithm):
         L_tgt_contrastive = self.siglip_loss(
             anchor=trg_t_proj,      # Temporal as anchor (transferable)
             positive=trg_f_proj,    # Frequency as positive
-            temperature=self.args.c_trg_temp  # 0.05 ~ 0.10 (قوی‌تر)
+            temperature=self.args.c_trg_temp,  # 0.05 ~ 0.10 (قوی‌تر)
+            bias=self.siglip_bias
         )
 
         # === Adaptive Ratio Balancing for SigLIP contrastive loss ===
@@ -315,12 +307,6 @@ class ACON(Algorithm):
         alpha_tgt = inv_tgt / (inv_src + inv_tgt)
 
         contrastive_loss = alpha_src * L_src_contrastive + alpha_tgt * L_tgt_contrastive
-
-
-        # ترکیب دو loss با ضرایب adaptive
-        contrastive_loss = alpha_src * L_src_contrastive + alpha_tgt * L_tgt_contrastive
-
-        # contrastive_loss = 0.1 * L_src_contrastive + 1.0 * L_tgt_contrastive
 
     
         loss = self.args.cls_trade_off * (src_t_cls_loss + src_f_cls_loss) \
@@ -346,115 +332,6 @@ class ACON(Algorithm):
                 align_s_tf_loss=align_s_tf_loss
         )
 
-        # === Analytics (هر 10 epoch) ===
-        ''' if (self.current_epoch + 1) % 25 == 0 or self.current_epoch == 0:
-            with torch.no_grad():
-                # نرمالیزه کردن برای محاسبه cosine similarity
-                src_f_norm = F.normalize(src_f_proj, dim=-1)
-                src_t_norm = F.normalize(src_t_proj, dim=-1)
-                trg_f_norm = F.normalize(trg_f_proj, dim=-1)
-                trg_t_norm = F.normalize(trg_t_proj, dim=-1)
-                
-                # === 1. Positive Pair Similarities (diagonal) ===
-                src_pos_sim = F.cosine_similarity(src_f_norm, src_t_norm).mean().item()
-                trg_pos_sim = F.cosine_similarity(trg_t_norm, trg_f_norm).mean().item()
-                
-                # === 2. Negative Pair Similarities (off-diagonal) ===
-                # Source domain
-                src_sim_matrix = torch.matmul(src_f_norm, src_t_norm.T)  # [B, B]
-                B = src_sim_matrix.size(0)
-                src_neg_mask = 1 - torch.eye(B, device=src_sim_matrix.device)
-                src_neg_sim = (src_sim_matrix * src_neg_mask).sum() / (B * (B - 1))
-                
-                # Target domain
-                trg_sim_matrix = torch.matmul(trg_t_norm, trg_f_norm.T)
-                trg_neg_mask = 1 - torch.eye(B, device=trg_sim_matrix.device)
-                trg_neg_sim = (trg_sim_matrix * trg_neg_mask).sum() / (B * (B - 1))
-                
-                # === 3. Alignment Quality (positive - negative gap) ===
-                src_gap = src_pos_sim - src_neg_sim.item()
-                trg_gap = trg_pos_sim - trg_neg_sim.item()
-                
-                # === 4. Intra-domain consistency ===
-                src_t_self_sim = torch.matmul(src_t_norm, src_t_norm.T)
-                src_f_self_sim = torch.matmul(src_f_norm, src_f_norm.T)
-                trg_t_self_sim = torch.matmul(trg_t_norm, trg_t_norm.T)
-                trg_f_self_sim = torch.matmul(trg_f_norm, trg_f_norm.T)
-                
-                src_t_consistency = (src_t_self_sim * src_neg_mask).sum() / (B * (B - 1))
-                src_f_consistency = (src_f_self_sim * src_neg_mask).sum() / (B * (B - 1))
-                trg_t_consistency = (trg_t_self_sim * trg_neg_mask).sum() / (B * (B - 1))
-                trg_f_consistency = (trg_f_self_sim * trg_neg_mask).sum() / (B * (B - 1))
-                
-                # === 5. Feature Distribution Statistics ===
-                src_t_std = src_t_proj.std(dim=0).mean().item()
-                src_f_std = src_f_proj.std(dim=0).mean().item()
-                trg_t_std = trg_t_proj.std(dim=0).mean().item()
-                trg_f_std = trg_f_proj.std(dim=0).mean().item()
-
-            # === Pretty Print ===
-            print(f"\n{'='*90}")
-            print(f"{'>>> SigLIP DETAILED ANALYTICS':^90}")
-            print(f"{'Epoch: ' + str(self.current_epoch + 1):^90}")
-            print(f"{'='*90}")
-            
-            # Source Domain
-            print(f"\n  📊 SOURCE DOMAIN (F→T):")
-            print(f"     ├─ Positive Similarity (diagonal):      {src_pos_sim:>6.4f}")
-            print(f"     ├─ Negative Similarity (off-diagonal):  {src_neg_sim.item():>6.4f}")
-            print(f"     ├─ Separation Gap (pos - neg):          {src_gap:>6.4f}  {'✅' if src_gap > 0.3 else '⚠️' if src_gap > 0.15 else '❌'}")
-            print(f"     ├─ Temporal Self-Consistency:           {src_t_consistency.item():>6.4f}")
-            print(f"     ├─ Frequency Self-Consistency:          {src_f_consistency.item():>6.4f}")
-            print(f"     └─ Feature Std (T/F):                   {src_t_std:>6.4f} / {src_f_std:>6.4f}")
-            
-            # Target Domain
-            print(f"\n  📊 TARGET DOMAIN (T→F):")
-            print(f"     ├─ Positive Similarity (diagonal):      {trg_pos_sim:>6.4f}")
-            print(f"     ├─ Negative Similarity (off-diagonal):  {trg_neg_sim.item():>6.4f}")
-            print(f"     ├─ Separation Gap (pos - neg):          {trg_gap:>6.4f}  {'✅' if trg_gap > 0.3 else '⚠️' if trg_gap > 0.15 else '❌'}")
-            print(f"     ├─ Temporal Self-Consistency:           {trg_t_consistency.item():>6.4f}")
-            print(f"     ├─ Frequency Self-Consistency:          {trg_f_consistency.item():>6.4f}")
-            print(f"     └─ Feature Std (T/F):                   {trg_t_std:>6.4f} / {trg_f_std:>6.4f}")
-            
-            # Model Parameters
-            print(f"\n  🎛️  MODEL PARAMETERS:")
-            print(f"     ├─ SigLIP Learnable Bias:               {self.siglip_bias.item():>6.4f}")
-            print(f"     ├─ Source Temperature:                  {self.args.c_src_temp:>6.4f}")
-            print(f"     ├─ Target Temperature:                  {self.args.c_trg_temp:>6.4f}")
-            print(f"     └─ Contrastive Loss:                    {contrastive_loss.item():>6.4f}")
-            
-            # Loss Components
-            print(f"\n  📈 LOSS BREAKDOWN:")
-            print(f"     ├─ L_src_contrastive:                   {L_src_contrastive.item():>6.4f}")
-            print(f"     └─ L_tgt_contrastive:                   {L_tgt_contrastive.item():>6.4f}")
-            
-            # Overall Assessment
-            print(f"\n  🎯 TRANSFERABILITY ASSESSMENT:")
-            if trg_pos_sim > 0.85 and trg_gap > 0.3:
-                status = "✅ EXCELLENT - High transferability achieved!"
-            elif trg_pos_sim > 0.75 and trg_gap > 0.2:
-                status = "⚠️  GOOD - Moderate transferability"
-            elif trg_pos_sim > 0.60 and trg_gap > 0.1:
-                status = "⚠️  FAIR - Needs more training"
-            else:
-                status = "❌ POOR - Consider adjusting hyperparameters"
-            print(f"     {status}")
-            
-            # Recommendations
-            print(f"\n  💡 RECOMMENDATIONS:")
-            if trg_gap < 0.15:
-                print(f"     ⚠️  Target gap is low - consider increasing contrastive_trade_off")
-            if src_neg_sim.item() > 0.5:
-                print(f"     ⚠️  Source negatives too similar - consider decreasing temperature")
-            if trg_t_std < 0.3 or trg_f_std < 0.3:
-                print(f"     ⚠️  Low feature variance - risk of collapse!")
-            if abs(trg_t_consistency.item() - trg_f_consistency.item()) > 0.2:
-                print(f"     ⚠️  Temporal and Frequency inconsistency mismatch")
-            if trg_pos_sim > 0.85 and trg_gap > 0.3:
-                print(f"     ✅ All metrics look good!")
-            
-            print(f"{'='*90}\n")
-        '''
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
