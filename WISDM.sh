@@ -9,9 +9,11 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --cls_trade_off 1 \
  --domain_trade_off 1 \
  --entropy_trade_off 0.02 \
- --align_t_trade_off 2 \
+ --align_t_trade_off 1 \
  --align_s_trade_off 1 \
- --kl_t 3.0 \
- --uncertainty_weight 0.2 \
+ --kl_t 4.0 \
+ --uncertainty_weight 0.1 \
+ --lambda_sig_src 0.1 \
+ --lambda_sig_trg 0.1 \
  --debug
 #  --device cuda \

@@ -213,8 +213,12 @@ class ACON(Algorithm):
         trg_t_vec = self._global_pool_t(trg_t_feat)   # [B_t, C_t]
 
         # 2) بردارهای فرکانسی: همین featureهای real بعد از linear1
-        src_f_vec = src_f_feat                        # [B_s, in_dim]
-        trg_f_vec = trg_f_feat                        # [B_t, in_dim]
+        # src_f_vec = src_f_feat                        # [B_s, in_dim]
+        # trg_f_vec = trg_f_feat                        # [B_t, in_dim]
+
+        # 2) بردارهای فرکانسی: از amplitude خام encoder استفاده کن
+        src_f_vec = src_a_cls                         # [B_s, fft_mode * C]
+        trg_f_vec = trg_a_cls                         # [B_t, fft_mode * C]
 
         # 3) پروجکشن به فضای مشترک SigLIP
         src_t_emb = self.t_proj(src_t_vec)            # [B_s, siglip_dim]

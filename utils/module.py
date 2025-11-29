@@ -55,28 +55,15 @@ class CNN(nn.Module):
         x_flat = x.reshape(x.shape[0], -1)
         return x_flat
 
-
-
-
-
-# class TemporalClassifierHead(nn.Module):
-
-#     def __init__(self, in_dim, num_classes, bias=True):
-#         super(TemporalClassifierHead, self).__init__()
-#         self.head = nn.Linear(in_dim, num_classes, bias=bias)
-
-#     def forward(self, x):
-#         predictions = self.head(x)
-#         return predictions
     
 class TemporalClassifierHead(nn.Module):
-    def __init__(self, in_dim, num_classes, bias=True, dropout_p=0.5):
+    def __init__(self, in_dim, num_classes, bias=True, dropout_p=0.6):
         super(TemporalClassifierHead, self).__init__()
         self.dropout = nn.Dropout(p=dropout_p)
         self.head = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x):
-        x = self.dropout(x)  # Enables stochasticity
+        x = self.dropout(x)
         return self.head(x)
 
 
