@@ -33,37 +33,30 @@ class ACON(Algorithm):
         # model
         self.t_feature_extractor = CNN(configs)
         self.t_classifier = TemporalClassifierHead(self.t_feature_extractor.out_dim, configs.num_classes)
-        # self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
 
         # ------------------ SigLIP projection heads (multi-view) ------------------
-        self.siglip_dim = getattr(args, "siglip_dim", 128)  # می‌تونی از config بخوانی
-
+        self.siglip_dim = getattr(args, "siglip_dim", 128)
         self.t_proj = nn.Sequential(
             nn.Linear(self.t_feature_extractor.out_dim, self.siglip_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.siglip_dim, self.siglip_dim),
         )
-
         self.f_proj = nn.Sequential(
             nn.Linear(self.f_classifier.linear1.in_features, self.siglip_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.siglip_dim, self.siglip_dim),
         )
 
-        # --- SigLIP logit scale & bias (طبق پیشنهاد SigLIP) 
-        # scale = exp(logit_scale) و bias ~ -10
         self.siglip_logit_scale = nn.Parameter(torch.log(torch.tensor(10.0)))  # ~ log(10)
         self.siglip_logit_bias = nn.Parameter(torch.tensor(-10.0))
 
-        # --- وزن‌های لاس جدید (می‌تونی از args تنظیم کنی) ---
         self.lambda_sig_src = getattr(args, "lambda_sig_src", 0.1)
         self.lambda_sig_trg = getattr(args, "lambda_sig_trg", 0.1)
 
         # ------------------------------------------------------------------------
 
-        # --- Graph module (attention + top-k + GCN) ---
         self.graph_module = GraphCorrelationModule(
             t_dim=self.t_feature_extractor.out_dim,
             f_dim=self.f_classifier.linear1.in_features,
@@ -71,9 +64,6 @@ class ACON(Algorithm):
             node_embed=16, gnn_hidden=64, out_dim=128, dropout=0.1
         )
 
-
-
-        # discriminator روی خروجی گراف
         self.domain_classifier = Discriminator(
             self.graph_module.out_dim,
             self.args.disc_hid_dim
@@ -141,19 +131,12 @@ class ACON(Algorithm):
         return a_cls, a_disc
     
 
-    # x_t_feat: معمولاً شکل [B, C, T] از t_feature_extractor
     def _global_pool_t(self, t_feat):
-        # اگر قبلاً جای دیگری از یک pooling مشخص استفاده می‌کنی
-        # می‌تونی همان را اینجا هم صدا بزنی
         if t_feat.dim() == 3:
-            # global average over time
-            # [B, C, T] -> [B, C]
             return t_feat.mean(dim=-1)
         elif t_feat.dim() == 2:
-            # اگر همین الان هم [B, C] است
             return t_feat
         else:
-            # در صورت شکل عجیب، فعلاً flatten
             return t_feat.view(t_feat.size(0), -1)
 
 
@@ -207,14 +190,9 @@ class ACON(Algorithm):
         h_concat = torch.cat([h_src, h_trg], dim=0)
 
         # ----------------- SigLIP contrastive (asymmetric) -----------------
-
         # 1) بردارهای global تمپورال
         src_t_vec = self._global_pool_t(src_t_feat)   # [B_s, C_t]
         trg_t_vec = self._global_pool_t(trg_t_feat)   # [B_t, C_t]
-
-        # 2) بردارهای فرکانسی: همین featureهای real بعد از linear1
-        # src_f_vec = src_f_feat                        # [B_s, in_dim]
-        # trg_f_vec = trg_f_feat                        # [B_t, in_dim]
 
         # 2) بردارهای فرکانسی: از amplitude خام encoder استفاده کن
         src_f_vec = src_a_cls                         # [B_s, fft_mode * C]
@@ -227,7 +205,6 @@ class ACON(Algorithm):
         trg_f_emb = self.f_proj(trg_f_vec)            # [B_t, siglip_dim]
 
         # 4) لاس‌های asymmetric
-
         # سورس: فرکانسی معلم، تمپورال دانش‌آموز
         siglip_src = self._siglip_loss(
             teacher_emb=src_f_emb.detach(),   # معلم: detach
@@ -271,7 +248,6 @@ class ACON(Algorithm):
             reduction='none'
         ).sum(dim=1)
 
-
         uncert_trg_t = self.compute_uncertainty(self.t_classifier, trg_t_feat)
         eps = 1e-5
         
@@ -287,10 +263,7 @@ class ACON(Algorithm):
         ).sum(dim=1)
         
         align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
-        
             
-
-    
         entropy_trg_t = self.criterion_cond(trg_t_pred)
         entropy_trg_f = self.criterion_cond(trg_f_pred)
     
@@ -307,8 +280,6 @@ class ACON(Algorithm):
         loss.backward()
         self.optimizer.step()
     
-
-            
         self.idea_logger.log(
                 epoch=self.current_epoch,
                 trg_t_pred=trg_t_pred,
@@ -332,29 +303,23 @@ class ACON(Algorithm):
             "SigLIP trg asym": siglip_trg.item(),
         }
 
-
-    
-
     # Uncertainty-Aware Mutual Learning
-
     def compute_uncertainty(self, model_fn, x, M=None):
         M = M or self.mc_passes
         preds = []
     
-        model_fn.train()  # ⬅️ اضافه کن!
+        model_fn.train()
     
         for _ in range(M):
             with torch.no_grad():
                 y = model_fn(x)
-                preds.append(F.softmax(y, dim=1))  # [B, C]
+                preds.append(F.softmax(y, dim=1))
     
-        stacked_preds = torch.stack(preds)  # [M, B, C]
-        var = torch.var(stacked_preds, dim=0)  # [B, C]
-        return var.mean(dim=1)  # [B]
-    
+        stacked_preds = torch.stack(preds)
+        var = torch.var(stacked_preds, dim=0)
+        return var.mean(dim=1)
 
-
-    '''return predictions'''
+    # return predictions
     def predict(self, data):
         self.t_feature_extractor.eval()
         self.t_classifier.eval()
@@ -363,8 +328,6 @@ class ACON(Algorithm):
             pred = self.t_classifier(t_feat)
         return pred
         
-       
-
     def save_model(self, path):
         torch.save({
             't_encoder': self.t_feature_extractor.state_dict(),

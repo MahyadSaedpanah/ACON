@@ -1,5 +1,4 @@
- 
-CUDA_VISIBLE_DEVICES=0 python main.py \
+ CUDA_VISIBLE_DEVICES=0 python main.py \
  --experiment_description ACON \
  --run_description WISDM \
  --da_method ACON \
@@ -13,6 +12,7 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --align_s_trade_off 1 \
  --kl_t 4.0 \
  --uncertainty_weight 0.1 \
+ --mc_passes 20 \
  --lambda_sig_src 0.1 \
  --lambda_sig_trg 0.1 \
  --debug
