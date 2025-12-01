@@ -1,6 +1,6 @@
 """
-@author: Mingyang Liu
-@contact: mingyang1024@gmail.com
+@author: Mahyad Saedpanah
+@contact: saedpanahmahyad@gmail.com
 """
 
 import torch
@@ -9,9 +9,7 @@ import torch.nn.functional as F
 from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
-from utils.idea_logger import IdeaLogger
-
-
+from utils.contrastive_logger import ContrastiveLogger
     
 class ACON(Algorithm):
     """
@@ -60,7 +58,7 @@ class ACON(Algorithm):
         self.graph_module = GraphCorrelationModule(
             t_dim=self.t_feature_extractor.out_dim,
             f_dim=self.f_classifier.linear1.in_features,
-            avg_mode=configs.avg_mode,    # از config دیتاست
+            avg_mode=configs.avg_mode,
             node_embed=16, gnn_hidden=64, out_dim=128, dropout=0.1
         )
 
@@ -99,9 +97,8 @@ class ACON(Algorithm):
         self.mc_passes = getattr(args, "mc_passes", 10)
         self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
 
-        self.idea_logger = IdeaLogger(log_dir=getattr(args, "log_dir", "."))
-
-
+        contrastive_log_path = getattr(args, "contrastive_log_path", "contrastive_logs.csv")
+        self.contrastive_logger = ContrastiveLogger(log_path=contrastive_log_path)
 
 
     def period_data(self, x, period):
@@ -216,6 +213,10 @@ class ACON(Algorithm):
             teacher_emb=trg_t_emb.detach(),   # معلم
             student_emb=trg_f_emb             # دانش‌آموز
         )
+
+        with torch.no_grad():
+            cos_src = F.cosine_similarity(src_t_emb, src_f_emb, dim=-1).mean()
+            cos_trg = F.cosine_similarity(trg_t_emb, trg_f_emb, dim=-1).mean()
     
         disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
@@ -279,16 +280,34 @@ class ACON(Algorithm):
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-    
-        self.idea_logger.log(
-                epoch=self.current_epoch,
-                trg_t_pred=trg_t_pred,
-                kl_src=kl_src,
-                kl_trg=kl_trg,
-                uncert_trg_t=uncert_trg_t if 'uncert_trg_t' in locals() else None,
-                align_t_tf_loss=align_t_tf_loss,
-                align_s_tf_loss=align_s_tf_loss
-        )
+
+        # --------- Contrastive-specific logging to a separate CSV file ---------
+        try:
+            siglip_scale = torch.exp(self.siglip_logit_scale).item()
+            siglip_bias = self.siglip_logit_bias.item()
+        except Exception:
+            siglip_scale = None
+            siglip_bias = None
+
+        self.contrastive_logger.log({
+            "epoch": self.current_epoch,
+            "src_t_cls_loss": src_t_cls_loss.item(),
+            "src_f_cls_loss": src_f_cls_loss.item(),
+            "domain_loss": domain_loss.item(),
+            "domain_acc": domain_acc.item(),
+            "align_s_tf_loss": align_s_tf_loss.item(),
+            "align_t_tf_loss": align_t_tf_loss.item(),
+            "cond_ent_t": entropy_trg_t.item(),
+            "cond_ent_f": entropy_trg_f.item(),
+            "siglip_src": siglip_src.item(),
+            "siglip_trg": siglip_trg.item(),
+            "siglip_src_eff": self.lambda_sig_src * siglip_src.item(),
+            "siglip_trg_eff": self.lambda_sig_trg * siglip_trg.item(),
+            "cos_src": cos_src.item(),
+            "cos_trg": cos_trg.item(),
+            "siglip_scale": siglip_scale,
+            "siglip_bias": siglip_bias,
+        })
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
