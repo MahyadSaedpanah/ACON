@@ -101,6 +101,10 @@ class da_trainer(object):
                 algorithm = algorithm_class(self.dataset_configs, self.device, self.args)
                 
                 algorithm.to(self.device)
+                # ------- for log contrastive -------
+                algorithm.scenario_name = f"{src_id}_to_{trg_id}"
+                algorithm.run_id = run_id
+                # -------------------------------------
                 self.algorithm = algorithm       
                 self.logger.debug('Source Test Dataset {}  Target Test Dataset {}'.format(len(self.src_test_dl), len(self.trg_test_dl)))
 
@@ -177,6 +181,10 @@ class da_trainer(object):
                 algorithm = algorithm_class(self.dataset_configs, self.device, self.args)
                 
                 algorithm.to(self.device)
+                # ------- for log contrastive -------
+                algorithm.scenario_name = f"{src_id}_to_{trg_id}"
+                algorithm.run_id = run_id
+                # -----------------------------------
                 self.algorithm = algorithm
                 source_loss_history = {}
                 target_loss_history = {}

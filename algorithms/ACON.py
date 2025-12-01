@@ -27,6 +27,8 @@ class ACON(Algorithm):
         self.fft_mode = self.period // 2 + 1
         assert self.avg_mode < self.fft_mode
         self.kl_t = args.kl_t
+        self.scenario_name = "unknown"
+        self.run_id = -1
 
         # model
         self.t_feature_extractor = CNN(configs)
@@ -289,25 +291,32 @@ class ACON(Algorithm):
             siglip_scale = None
             siglip_bias = None
 
-        self.contrastive_logger.log({
-            "epoch": self.current_epoch,
-            "src_t_cls_loss": src_t_cls_loss.item(),
-            "src_f_cls_loss": src_f_cls_loss.item(),
-            "domain_loss": domain_loss.item(),
-            "domain_acc": domain_acc.item(),
-            "align_s_tf_loss": align_s_tf_loss.item(),
-            "align_t_tf_loss": align_t_tf_loss.item(),
-            "cond_ent_t": entropy_trg_t.item(),
-            "cond_ent_f": entropy_trg_f.item(),
-            "siglip_src": siglip_src.item(),
-            "siglip_trg": siglip_trg.item(),
-            "siglip_src_eff": self.lambda_sig_src * siglip_src.item(),
-            "siglip_trg_eff": self.lambda_sig_trg * siglip_trg.item(),
-            "cos_src": cos_src.item(),
-            "cos_trg": cos_trg.item(),
-            "siglip_scale": siglip_scale,
-            "siglip_bias": siglip_bias,
-        })
+        if self.current_epoch == self.args.num_epochs:
+            scenario = getattr(self, "scenario_name", "unknown")
+            run_id = getattr(self, "run_id", -1)
+
+            self.contrastive_logger.log({
+                "scenario": scenario,
+                "run_id": run_id,
+                "epoch": self.current_epoch,
+                "src_t_cls_loss": src_t_cls_loss.item(),
+                "src_f_cls_loss": src_f_cls_loss.item(),
+                "domain_loss": domain_loss.item(),
+                "domain_acc": domain_acc.item(),
+                "align_s_tf_loss": align_s_tf_loss.item(),
+                "align_t_tf_loss": align_t_tf_loss.item(),
+                "cond_ent_t": entropy_trg_t.item(),
+                "cond_ent_f": entropy_trg_f.item(),
+                "siglip_src": siglip_src.item(),
+                "siglip_trg": siglip_trg.item(),
+                "siglip_src_eff": self.lambda_sig_src * siglip_src.item(),
+                "siglip_trg_eff": self.lambda_sig_trg * siglip_trg.item(),
+                "cos_src": cos_src.item(),
+                "cos_trg": cos_trg.item(),
+                "siglip_scale": siglip_scale,
+                "siglip_bias": siglip_bias,
+            })
+
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
