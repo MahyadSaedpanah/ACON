@@ -52,8 +52,8 @@ class ACON(Algorithm):
         self.siglip_logit_scale = nn.Parameter(torch.log(torch.tensor(10.0)))  # ~ log(10)
         self.siglip_logit_bias = nn.Parameter(torch.tensor(-10.0))
 
-        self.lambda_sig_src = getattr(args, "lambda_sig_src", 0.1)
-        self.lambda_sig_trg = getattr(args, "lambda_sig_trg", 0.1)
+        self.lambda_sig_src = getattr(args, "lambda_sig_src", 0.0)
+        self.lambda_sig_trg = getattr(args, "lambda_sig_trg", 0.0)
 
         # ------------------------------------------------------------------------
 
