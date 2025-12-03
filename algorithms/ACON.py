@@ -36,6 +36,27 @@ class ACON(Algorithm):
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
 
+        # ------------------ SigLIP projection heads (multi-view) ------------------
+        self.siglip_dim = getattr(args, "siglip_dim", 128)
+        self.t_proj = nn.Sequential(
+            nn.Linear(self.t_feature_extractor.out_dim, self.siglip_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.siglip_dim, self.siglip_dim),
+        )
+        self.f_proj = nn.Sequential(
+            nn.Linear(self.f_classifier.linear1.in_features, self.siglip_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.siglip_dim, self.siglip_dim),
+        )
+
+        self.siglip_logit_scale = nn.Parameter(torch.log(torch.tensor(10.0)))  # ~ log(10)
+        self.siglip_logit_bias = nn.Parameter(torch.tensor(-10.0))
+
+        self.lambda_sig_src = getattr(args, "lambda_sig_src", 0.0)
+        self.lambda_sig_trg = getattr(args, "lambda_sig_trg", 0.0)
+
+        # ------------------------------------------------------------------------
+
 
         # --- Graph module (attention + top-k + GCN) ---
         self.graph_module = GraphCorrelationModule(
@@ -62,7 +83,10 @@ class ACON(Algorithm):
 	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
+            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
+            {'params': self.t_proj.parameters()},
+            {'params': self.f_proj.parameters()},
+            {'params': [self.siglip_logit_scale, self.siglip_logit_bias]},
             ],
             lr=args.lr,
             weight_decay=args.weight_decay
@@ -104,6 +128,37 @@ class ACON(Algorithm):
         a_cls = a_cls.reshape(a_cls.size(0), -1)
         return a_cls, a_disc
     
+    def _global_pool_t(self, t_feat):
+        if t_feat.dim() == 3:
+            return t_feat.mean(dim=-1)
+        elif t_feat.dim() == 2:
+            return t_feat
+        else:
+            return t_feat.view(t_feat.size(0), -1)
+
+
+    def _siglip_loss(self, teacher_emb, student_emb):
+        # L2 normalize
+        z_a = F.normalize(teacher_emb, dim=-1)
+        z_b = F.normalize(student_emb, dim=-1)
+    
+        logit_scale = torch.exp(self.siglip_logit_scale)
+        logits = logit_scale * (z_a @ z_b.t()) + self.siglip_logit_bias  # [N, N]
+    
+        N = logits.size(0)
+        device = logits.device
+    
+        # labels in {0, 1}
+        labels = torch.zeros_like(logits, device=device)
+        idx = torch.arange(N, device=device)
+        labels[idx, idx] = 1.0  # positives on the diagonal
+    
+        # BCE with logits = sigmoid-based loss in SigLIP
+        loss = F.binary_cross_entropy_with_logits(logits, labels)
+    
+        return loss
+
+    
     
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
@@ -141,6 +196,35 @@ class ACON(Algorithm):
         h_src = self.graph_module(src_t_feat, src_f_feat)  # [B, out_dim]
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
         h_concat = torch.cat([h_src, h_trg], dim=0)        # [2B, out_dim]
+
+
+        # ----------------- SigLIP contrastive (asymmetric) -----------------
+        # 1) بردارهای global تمپورال
+        src_t_vec = self._global_pool_t(src_t_feat)   # [B_s, C_t]
+        trg_t_vec = self._global_pool_t(trg_t_feat)   # [B_t, C_t]
+
+        # 2) بردارهای فرکانسی: از amplitude خام encoder استفاده کن
+        src_f_vec = src_a_cls                         # [B_s, fft_mode * C]
+        trg_f_vec = trg_a_cls                         # [B_t, fft_mode * C]
+
+        # 3) پروجکشن به فضای مشترک SigLIP
+        src_t_emb = self.t_proj(src_t_vec)            # [B_s, siglip_dim]
+        trg_t_emb = self.t_proj(trg_t_vec)            # [B_t, siglip_dim]
+        src_f_emb = self.f_proj(src_f_vec)            # [B_s, siglip_dim]
+        trg_f_emb = self.f_proj(trg_f_vec)            # [B_t, siglip_dim]
+
+        # 4) لاس‌های asymmetric
+        # سورس: فرکانسی معلم، تمپورال دانش‌آموز
+        siglip_src = self._siglip_loss(
+            teacher_emb=src_f_emb.detach(),   # معلم: detach
+            student_emb=src_t_emb             # دانش‌آموز
+        )
+
+        # تارگت: تمپورال معلم، فرکانسی دانش‌آموز
+        siglip_trg = self._siglip_loss(
+            teacher_emb=trg_t_emb.detach(),   # معلم
+            student_emb=trg_f_emb             # دانش‌آموز
+        )
     
         # -------------------------------
         # 5) Discriminator - مرحله اول (domain real labels)
@@ -194,7 +278,10 @@ class ACON(Algorithm):
                + self.args.domain_trade_off * domain_loss \
                + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
                + self.args.align_t_trade_off * align_t_tf_loss \
-               + self.args.align_s_trade_off * align_s_tf_loss
+               + self.args.align_s_trade_off * align_s_tf_loss \
+               + self.lambda_sig_src * siglip_src \
+               + self.lambda_sig_trg * siglip_trg
+
     
         # -------------------------------
         # 11) Update feature extractors + graph + classifiers
@@ -214,7 +301,9 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            "SigLIP src asym": siglip_src.item(),
+            "SigLIP trg asym": siglip_trg.item(),
         }
     
     

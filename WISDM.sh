@@ -11,4 +11,8 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --entropy_trade_off 0.01 \
  --align_t_trade_off 1 \
  --align_s_trade_off 1 \
- --device cuda \
+ --kl_t 2 \
+ --lambda_sig_src 0.1 \
+ --lambda_sig_trg 0.1 \
+ --debug
+#  --device cuda \

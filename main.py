@@ -52,6 +52,10 @@ parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
 
+parser.add_argument('--lambda_sig_src', type=float, default=0.1)
+parser.add_argument('--lambda_sig_trg', type=float, default=0.1)
+
+
 # ========= Debug Mode ===============
 parser.add_argument('--debug', action='store_true', help='Run in debug mode (lightweight settings)')
 
@@ -60,7 +64,7 @@ args = parser.parse_args()
 # Override settings for debug mode
 if args.debug:
     args.num_runs = 1
-    args.num_epochs = 5
+    args.num_epochs = 10
     args.start = 0
     args.end = 1
 
