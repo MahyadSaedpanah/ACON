@@ -54,8 +54,13 @@ parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
 parser.add_argument('--mc_passes', type=int, default=10)
 
-parser.add_argument('--lambda_sig_src', type=float, default=0.1)
-parser.add_argument('--lambda_sig_trg', type=float, default=0.1)
+parser.add_argument('--lambda_LT', type=float, default=0.1, help='weight for TF-C time NT-Xent loss (LT)')
+parser.add_argument('--lambda_LF', type=float, default=0.1, help='weight for TF-C freq NT-Xent loss (LF)')
+parser.add_argument('--lambda_LC', type=float, default=0.1, help='weight for TF-C consistency triplet loss (LC)')
+
+parser.add_argument('--tfc_tau', type=float, default=0.1, help='temperature for NT-Xent in TF-C')
+parser.add_argument('--tfc_margin', type=float, default=0.1, help='margin delta for TF-C consistency loss LC')
+
 
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 
@@ -71,7 +76,7 @@ if args.debug:
     args.num_runs = 1
     args.num_epochs = 10
     args.start = 0
-    args.end = 1
+    args.end = 10
 
 
 

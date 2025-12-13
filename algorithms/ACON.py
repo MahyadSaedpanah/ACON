@@ -6,10 +6,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.loss import ConditionalEntropyLoss
+from utils.loss import (
+    ConditionalEntropyLoss,
+    nt_xent_pair,
+    tfc_consistency_loss_src,
+    tfc_consistency_loss_tgt,
+)
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
-from utils.contrastive_logger import ContrastiveLogger
+from utils.augmentations import augment_time, augment_freq_spectrum
+
+# from utils.contrastive_logger import ContrastiveLogger
     
 class ACON(Algorithm):
     """
@@ -36,26 +43,27 @@ class ACON(Algorithm):
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
 
-        # ------------------ SigLIP projection heads (multi-view) ------------------
-        self.siglip_dim = getattr(args, "siglip_dim", 128)
+        # ------------------ TF-C projection heads (RT, RF) ------------------
+        self.tfc_dim = getattr(args, "tfc_dim", 128)
         self.t_proj = nn.Sequential(
-            nn.Linear(self.t_feature_extractor.out_dim, self.siglip_dim),
+            nn.Linear(self.t_feature_extractor.out_dim, self.tfc_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.siglip_dim, self.siglip_dim),
+            nn.Linear(self.tfc_dim, self.tfc_dim),
         )
         self.f_proj = nn.Sequential(
-            nn.Linear(self.f_classifier.linear1.in_features, self.siglip_dim),
+            nn.Linear(self.f_classifier.linear1.in_features, self.tfc_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.siglip_dim, self.siglip_dim),
+            nn.Linear(self.tfc_dim, self.tfc_dim),
         )
 
-        self.siglip_logit_scale = nn.Parameter(torch.log(torch.tensor(10.0)))  # ~ log(10)
-        self.siglip_logit_bias = nn.Parameter(torch.tensor(-10.0))
+        # TF-C hyperparameters
+        self.lambda_LT = getattr(args, "lambda_LT", 0.0)
+        self.lambda_LF = getattr(args, "lambda_LF", 0.0)
+        self.lambda_LC = getattr(args, "lambda_LC", 0.0)
 
-        self.lambda_sig_src = getattr(args, "lambda_sig_src", 0.0)
-        self.lambda_sig_trg = getattr(args, "lambda_sig_trg", 0.0)
+        self.tfc_tau = getattr(args, "tfc_tau", 0.1)
+        self.tfc_margin = getattr(args, "tfc_margin", 0.1)
 
-        # ------------------------------------------------------------------------
 
         self.graph_module = GraphCorrelationModule(
             t_dim=self.t_feature_extractor.out_dim,
@@ -75,13 +83,12 @@ class ACON(Algorithm):
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	        {'params': self.t_classifier.parameters()},
+	          {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
             {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
             {'params': self.t_proj.parameters()},
             {'params': self.f_proj.parameters()},
-            {'params': [self.siglip_logit_scale, self.siglip_logit_bias]},
             ],
             lr=args.lr,
             weight_decay=args.weight_decay
@@ -99,8 +106,8 @@ class ACON(Algorithm):
         self.mc_passes = getattr(args, "mc_passes", 10)
         self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
 
-        contrastive_log_path = getattr(args, "contrastive_log_path", "contrastive_logs.csv")
-        self.contrastive_logger = ContrastiveLogger(log_path=contrastive_log_path)
+        # contrastive_log_path = getattr(args, "contrastive_log_path", "contrastive_logs.csv")
+        # self.contrastive_logger = ContrastiveLogger(log_path=contrastive_log_path)
 
 
     def period_data(self, x, period):
@@ -139,28 +146,6 @@ class ACON(Algorithm):
             return t_feat.view(t_feat.size(0), -1)
 
 
-    def _siglip_loss(self, teacher_emb, student_emb):
-        # L2 normalize
-        z_a = F.normalize(teacher_emb, dim=-1)
-        z_b = F.normalize(student_emb, dim=-1)
-    
-        logit_scale = torch.exp(self.siglip_logit_scale)
-        logits = logit_scale * (z_a @ z_b.t()) + self.siglip_logit_bias  # [N, N]
-    
-        N = logits.size(0)
-        device = logits.device
-    
-        # labels in {0, 1}
-        labels = torch.zeros_like(logits, device=device)
-        idx = torch.arange(N, device=device)
-        labels[idx, idx] = 1.0  # positives on the diagonal
-    
-        # BCE with logits = sigmoid-based loss in SigLIP
-        loss = F.binary_cross_entropy_with_logits(logits, labels)
-    
-        return loss
-
-
 
     def update(self, src_x, src_y, trg_x):
         bs = src_x.size(0)
@@ -173,52 +158,102 @@ class ACON(Algorithm):
         src_t_pred = self.t_classifier(src_t_feat)
         trg_t_feat = self.t_feature_extractor(trg_x)
         trg_t_pred = self.t_classifier(trg_t_feat)
+
+        # --------- TF-C: time NT-Xent (LT) ---------
+        # encoder outputs → pooled features
+        hT_src = self._global_pool_t(src_t_feat)   # [Bs, Ct]
+        hT_trg = self._global_pool_t(trg_t_feat)   # [Bt, Ct]
+        hT_all = torch.cat([hT_src, hT_trg], dim=0)  # [B, Ct]
+
+        # یک view augment‌شده زمانی برای کل batch (source+target)
+        x_all = torch.cat([src_x, trg_x], dim=0)          # [B, C, T]
+        x_all_aug = augment_time(x_all)                   # [B, C, T]
+        t_feat_all_aug = self.t_feature_extractor(x_all_aug)
+        hT_all_aug = self._global_pool_t(t_feat_all_aug)  # [B, Ct]
+
+        L_T = nt_xent_pair(
+            anchor=hT_all,
+            pos=hT_all_aug,
+            extra_neg=None,
+            tau=self.tfc_tau,
+            reduction='mean'
+        )
+
     
         src_f_feat = self.f_feature_extractor(self.period_data(src_x, self.period))
         trg_f_feat = self.f_feature_extractor(self.period_data(trg_x, self.period))
 
+
     
         src_a_cls, _ = self.get_amplitude(src_f_feat)
         trg_a_cls, _ = self.get_amplitude(trg_f_feat)
+
+         # --------- TF-C: freq NT-Xent (LF) ---------
+        src_f_feat_aug = augment_freq_spectrum(src_f_feat, self.fft_mode)
+        trg_f_feat_aug = augment_freq_spectrum(trg_f_feat, self.fft_mode)
+        src_a_cls_aug, _ = self.get_amplitude(src_f_feat_aug)
+        trg_a_cls_aug, _ = self.get_amplitude(trg_f_feat_aug)
+
+        hF_all = torch.cat([src_a_cls, trg_a_cls], dim=0)        # [B, F_flat]
+        hF_all_aug = torch.cat([src_a_cls_aug, trg_a_cls_aug], dim=0)
+
+        L_F = nt_xent_pair(
+            anchor=hF_all,
+            pos=hF_all_aug,
+            extra_neg=None,
+            tau=self.tfc_tau,
+            reduction='mean'
+        )
     
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
+
+        # --------- TF-C: consistency loss LC روی projectors (RT, RF) ---------
+        zT     = self.t_proj(hT_all)       # [B, D]    z^T
+        zT_aug = self.t_proj(hT_all_aug)   # [B, D]    z^eT
+        zF     = self.f_proj(hF_all)       # [B, D]    z^F
+        zF_aug = self.f_proj(hF_all_aug)   # [B, D]    z^eF
+
+        # جدا کردن source و target بر اساس bs
+        zT_src      = zT[:bs]
+        zT_trg      = zT[bs:]
+        zT_src_aug  = zT_aug[:bs]
+        zT_trg_aug  = zT_aug[bs:]
+
+        zF_src      = zF[:bs]
+        zF_trg      = zF[bs:]
+        zF_src_aug  = zF_aug[:bs]
+        zF_trg_aug  = zF_aug[bs:]
+
+        # روی SOURCE: time = student (anchor), freq = teacher نرم
+        L_C_src = tfc_consistency_loss_src(
+            z_t=zT_src,
+            z_t_aug=zT_src_aug,
+            z_f=zF_src,
+            z_f_aug=zF_src_aug,
+            tau=self.tfc_tau,
+            margin=self.tfc_margin,
+        )
+
+        # روی TARGET: freq = student (anchor), time = teacher نرم
+        L_C_tgt = tfc_consistency_loss_tgt(
+            z_t=zT_trg,
+            z_t_aug=zT_trg_aug,
+            z_f=zF_trg,
+            z_f_aug=zF_trg_aug,
+            tau=self.tfc_tau,
+            margin=self.tfc_margin,
+        )
+
+        # جمع نهایی L_C (فعلاً وزن‌ها برابر؛ بعداً می‌تونیم γ_src و γ_tgt اضافه کنیم)
+        L_C = L_C_src + L_C_tgt
+
+
     
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
         h_concat = torch.cat([h_src, h_trg], dim=0)
 
-        # ----------------- SigLIP contrastive (asymmetric) -----------------
-        # 1) بردارهای global تمپورال
-        src_t_vec = self._global_pool_t(src_t_feat)   # [B_s, C_t]
-        trg_t_vec = self._global_pool_t(trg_t_feat)   # [B_t, C_t]
-
-        # 2) بردارهای فرکانسی: از amplitude خام encoder استفاده کن
-        src_f_vec = src_a_cls                         # [B_s, fft_mode * C]
-        trg_f_vec = trg_a_cls                         # [B_t, fft_mode * C]
-
-        # 3) پروجکشن به فضای مشترک SigLIP
-        src_t_emb = self.t_proj(src_t_vec)            # [B_s, siglip_dim]
-        trg_t_emb = self.t_proj(trg_t_vec)            # [B_t, siglip_dim]
-        src_f_emb = self.f_proj(src_f_vec)            # [B_s, siglip_dim]
-        trg_f_emb = self.f_proj(trg_f_vec)            # [B_t, siglip_dim]
-
-        # 4) لاس‌های asymmetric
-        # سورس: فرکانسی معلم، تمپورال دانش‌آموز
-        siglip_src = self._siglip_loss(
-            teacher_emb=src_f_emb.detach(),   # معلم: detach
-            student_emb=src_t_emb             # دانش‌آموز
-        )
-
-        # تارگت: تمپورال معلم، فرکانسی دانش‌آموز
-        siglip_trg = self._siglip_loss(
-            teacher_emb=trg_t_emb.detach(),   # معلم
-            student_emb=trg_f_emb             # دانش‌آموز
-        )
-
-        with torch.no_grad():
-            cos_src = F.cosine_similarity(src_t_emb, src_f_emb, dim=-1).mean()
-            cos_trg = F.cosine_similarity(trg_t_emb, trg_f_emb, dim=-1).mean()
     
         disc_prediction = self.domain_classifier(h_concat.detach())
         disc_loss = self.cross_entropy(disc_prediction, domain_label_concat)
@@ -275,47 +310,13 @@ class ACON(Algorithm):
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
             + self.args.align_s_trade_off * align_s_tf_loss \
-            + self.lambda_sig_src * siglip_src \
-            + self.lambda_sig_trg * siglip_trg
-
+            + self.lambda_LT * L_T \
+            + self.lambda_LF * L_F \
+            + self.lambda_LC * L_C
     
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
-        # --------- Contrastive-specific logging to a separate CSV file ---------
-        try:
-            siglip_scale = torch.exp(self.siglip_logit_scale).item()
-            siglip_bias = self.siglip_logit_bias.item()
-        except Exception:
-            siglip_scale = None
-            siglip_bias = None
-
-        if self.current_epoch == self.args.num_epochs:
-            scenario = getattr(self, "scenario_name", "unknown")
-            run_id = getattr(self, "run_id", -1)
-
-            self.contrastive_logger.log({
-                "scenario": scenario,
-                "run_id": run_id,
-                "epoch": self.current_epoch,
-                "src_t_cls_loss": src_t_cls_loss.item(),
-                "src_f_cls_loss": src_f_cls_loss.item(),
-                "domain_loss": domain_loss.item(),
-                "domain_acc": domain_acc.item(),
-                "align_s_tf_loss": align_s_tf_loss.item(),
-                "align_t_tf_loss": align_t_tf_loss.item(),
-                "cond_ent_t": entropy_trg_t.item(),
-                "cond_ent_f": entropy_trg_f.item(),
-                "siglip_src": siglip_src.item(),
-                "siglip_trg": siglip_trg.item(),
-                "siglip_src_eff": self.lambda_sig_src * siglip_src.item(),
-                "siglip_trg_eff": self.lambda_sig_trg * siglip_trg.item(),
-                "cos_src": cos_src.item(),
-                "cos_trg": cos_trg.item(),
-                "siglip_scale": siglip_scale,
-                "siglip_bias": siglip_bias,
-            })
 
 
         return {
@@ -327,8 +328,9 @@ class ACON(Algorithm):
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
             'domain acc': domain_acc.item(),
-            "SigLIP src asym": siglip_src.item(),
-            "SigLIP trg asym": siglip_trg.item(),
+            'L_T': L_T.item(),
+            'L_F': L_F.item(),
+            'L_C': L_C.item(),
         }
 
     # Uncertainty-Aware Mutual Learning
@@ -376,5 +378,3 @@ class ACON(Algorithm):
         pred = torch.argmax(pred, dim=1)
         res = torch.sum(torch.eq(pred, label)) / label.size(0)
         return res
-
-

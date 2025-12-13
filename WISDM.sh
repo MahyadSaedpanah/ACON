@@ -13,7 +13,10 @@
  --kl_t 4.0 \
  --uncertainty_weight 0.1 \
  --mc_passes 20 \
- --lambda_sig_src 0.1 \
- --lambda_sig_trg 0.1 \
+ --lambda_LT 0.03 \
+ --lambda_LF 0.03 \
+ --lambda_LC 0.05 \
+ --tfc_tau 0.2 \
+ --tfc_margin 0.1 \
  --debug
 #  --device cuda \
