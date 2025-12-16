@@ -23,7 +23,6 @@ from algorithms import get_algorithm_class
 from algorithms.utils import get_time
 from algorithms.utils import AverageMeter
 from sklearn.metrics import f1_score
-from utils.plot import plot_losses, plot_metrics
 
 torch.backends.cudnn.benchmark = True  
 warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)        
@@ -122,9 +121,7 @@ class da_trainer(object):
                 df_a.to_csv(path,sep = ',')
                 path_s =  os.path.join(self.avg_res_dir, 'test_source_results.csv')
                 df_s.to_csv(path_s,sep = ',')
-                plot_losses(loss_history, self.avg_res_dir, run_id)
-                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id)
-
+                
        
         df_a = self.avg_result(df_a)
         df_s = self.avg_result(df_s)
@@ -260,12 +257,6 @@ class da_trainer(object):
                 df_a.to_csv(path,sep = ',')
                 path_s =  os.path.join(self.avg_res_dir, 'source_results.csv')
                 df_s.to_csv(path_s,sep = ',')
-                # save plots         
-                plot_losses(source_loss_history, self.avg_res_dir, run_id, mode="source")
-                plot_losses(target_loss_history, self.avg_res_dir, run_id, mode="target")
-                plot_metrics(acc_history, f1_history, self.avg_res_dir, run_id, mode="target")
-
-
 
 
         df_a = self.avg_result(df_a)

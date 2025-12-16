@@ -52,9 +52,35 @@ parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
 parser.add_argument('--uncertainty_weight', type=float, default=1.0)
-parser.add_argument('--mc_passes', type=float, default=10)
+parser.add_argument('--mc_passes', type=int, default=20)
 
-parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
+# ======== Contrastive (Factorized TF-C) ========
+parser.add_argument('--proj_dim', type=int, default=128, help='projection dim for contrastive heads')
+
+# weights
+parser.add_argument('--ins_t', type=float, default=1.0, help='target instance VICReg weight')
+parser.add_argument('--sh_t', type=float, default=1.0, help='target shared InfoNCE weight')
+parser.add_argument('--ins_s', type=float, default=0.0, help='source instance weight (default off)')
+parser.add_argument('--sh_s', type=float, default=0.0, help='source shared weight (default off)')
+
+# VICReg hyperparams
+parser.add_argument('--vic_sim', type=float, default=25.0)
+parser.add_argument('--vic_var', type=float, default=25.0)
+parser.add_argument('--vic_cov', type=float, default=1.0)
+
+# InfoNCE temperature
+parser.add_argument('--temp', type=float, default=0.2)
+
+# Time augmentation
+parser.add_argument('--aug_jit', type=float, default=0.02)
+parser.add_argument('--aug_scl', type=float, default=0.10)
+parser.add_argument('--aug_shf', type=int, default=8)
+
+# Frequency augmentation (on amplitude vector)
+parser.add_argument('--f_jit', type=float, default=0.01)
+parser.add_argument('--f_mask_p', type=float, default=0.2)
+parser.add_argument('--f_mask_w', type=int, default=8)
+
 
 
 
@@ -66,7 +92,7 @@ args = parser.parse_args()
 # Override settings for debug mode
 if args.debug:
     args.num_runs = 1
-    args.num_epochs = 10
+    args.num_epochs = 50
     args.start = 0
     args.end = 1
 

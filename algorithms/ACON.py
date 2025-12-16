@@ -6,10 +6,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.loss import ConditionalEntropyLoss
 from algorithms.algorithms_base import Algorithm
 from utils.module import *
-from utils.idea_logger import IdeaLogger
+from utils.loss import ConditionalEntropyLoss, VICRegLoss, NTXentLoss
+from utils.aug_contrastive import aug_t, aug_f
 
 
     
@@ -33,12 +33,33 @@ class ACON(Algorithm):
         # model
         self.t_feature_extractor = CNN(configs)
         self.t_classifier = TemporalClassifierHead(self.t_feature_extractor.out_dim, configs.num_classes)
-        # self.domain_classifier = Discriminator(self.t_feature_extractor.out_dim*self.avg_mode, self.args.disc_hid_dim)
         self.f_feature_extractor = FrequencyEncoder(configs.input_channels, configs.input_channels, self.fft_mode, configs.fft_normalize)
         self.f_classifier = FrequencyClassifierHead(self.fft_mode * configs.input_channels, configs.num_classes)
+        # ======== Contrastive heads (pre-graph) ========
+        pd = getattr(args, "proj_dim", 128)
 
+        t_in = self.t_feature_extractor.out_dim
+        f_in = self.f_classifier.linear1.in_features  # matches f_feat returned by f_classifier(..., True)
 
-        # --- Graph module (attention + top-k + GCN) ---
+        # instance heads
+        self.p_it = nn.Sequential(nn.Linear(t_in, pd), nn.ReLU(), nn.Linear(pd, pd))
+        self.p_if = nn.Sequential(nn.Linear(f_in, pd), nn.ReLU(), nn.Linear(pd, pd))
+
+        # shared heads
+        self.p_st = nn.Sequential(nn.Linear(t_in, pd), nn.ReLU(), nn.Linear(pd, pd))
+        self.p_sf = nn.Sequential(nn.Linear(f_in, pd), nn.ReLU(), nn.Linear(pd, pd))
+
+        # contrastive losses
+        self.vic = VICRegLoss(
+            sim_coeff=getattr(args, "vic_sim", 25.0),
+            var_coeff=getattr(args, "vic_var", 25.0),
+            cov_coeff=getattr(args, "vic_cov", 1.0),
+        )
+
+        self.ntx = NTXentLoss(temperature=getattr(args, "temp", 0.2))
+        # =================================================
+
+        # Graph module
         self.graph_module = GraphCorrelationModule(
             t_dim=self.t_feature_extractor.out_dim,
             f_dim=self.f_classifier.linear1.in_features,
@@ -46,9 +67,7 @@ class ACON(Algorithm):
             node_embed=16, gnn_hidden=64, out_dim=128, dropout=0.1
         )
 
-
-
-        # discriminator روی خروجی گراف
+        # discriminator
         self.domain_classifier = Discriminator(
             self.graph_module.out_dim,
             self.args.disc_hid_dim
@@ -60,14 +79,19 @@ class ACON(Algorithm):
         # optimizers
         self.optimizer = torch.optim.Adam([
             {'params': self.t_feature_extractor.parameters()},
-	          {'params': self.t_classifier.parameters()},
+	        {'params': self.t_classifier.parameters()},
             {'params': self.f_feature_extractor.parameters()},
             {'params': self.f_classifier.parameters()},
-            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01}
-            ],
-            lr=args.lr,
-            weight_decay=args.weight_decay
-        )
+            {'params': self.graph_module.parameters(), 'lr': args.lr * 0.01},
+            # contrastive heads
+            {'params': self.p_it.parameters()},
+            {'params': self.p_if.parameters()},
+            {'params': self.p_st.parameters()},
+            {'params': self.p_sf.parameters()},
+        ],
+        lr=args.lr,
+        weight_decay=args.weight_decay)
+        
        
         self.optimizer_disc = torch.optim.Adam(
             self.domain_classifier.parameters(),
@@ -80,9 +104,6 @@ class ACON(Algorithm):
 
         self.mc_passes = getattr(args, "mc_passes", 10)
         self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
-
-        self.idea_logger = IdeaLogger(log_dir=getattr(args, "log_dir", "."))
-
 
 
 
@@ -133,6 +154,77 @@ class ACON(Algorithm):
     
         src_f_pred, src_f_feat = self.f_classifier(src_a_cls, True)
         trg_f_pred, trg_f_feat = self.f_classifier(trg_a_cls, True)
+
+        # ===================== Target Instance (VICReg) =====================
+        ins_t_w = getattr(self.args, "ins_t", 1.0)
+        if ins_t_w > 0:
+            trg_xa = aug_t(trg_x, self.args)
+
+            # augmented time feat
+            trg_t_feat_a = self.t_feature_extractor(trg_xa)
+
+            # augmented freq feat (recompute from augmented time for consistency)
+            trg_f_feat_a0 = self.f_feature_extractor(self.period_data(trg_xa, self.period))
+            trg_a_cls_a, _ = self.get_amplitude(trg_f_feat_a0)
+
+            # explicit freq augmentation (amplitude-level)
+            trg_a_cls_a = aug_f(trg_a_cls_a, self.args)
+
+            # get augmented freq feature
+            _, trg_f_feat_a = self.f_classifier(trg_a_cls_a, True)
+
+            # project instance embeddings
+            itT   = self.p_it(trg_t_feat)
+            itT_a = self.p_it(trg_t_feat_a)
+            ifT   = self.p_if(trg_f_feat)
+            ifT_a = self.p_if(trg_f_feat_a)
+
+            trg_inst_loss = self.vic(itT, itT_a) + self.vic(ifT, ifT_a)
+        else:
+            trg_inst_loss = torch.tensor(0.0, device=self.device)
+
+        
+        # ===================== Target Shared (InfoNCE) =====================
+        sh_t_w = getattr(self.args, "sh_t", 1.0)
+        if sh_t_w > 0:
+            stT = self.p_st(trg_t_feat)
+            sfT = self.p_sf(trg_f_feat)
+            trg_sh_loss = self.ntx(stT, sfT)
+        else:
+            trg_sh_loss = torch.tensor(0.0, device=self.device)
+
+
+        # ===================== Source Instance (VICReg) =====================
+        ins_s_w = getattr(self.args, "ins_s", 0.0)
+        if ins_s_w > 0:
+            src_xa = aug_t(src_x, self.args)
+            src_t_feat_a = self.t_feature_extractor(src_xa)
+
+            src_f_feat_a0 = self.f_feature_extractor(self.period_data(src_xa, self.period))
+            src_a_cls_a, _ = self.get_amplitude(src_f_feat_a0)
+            src_a_cls_a = aug_f(src_a_cls_a, self.args)
+            _, src_f_feat_a = self.f_classifier(src_a_cls_a, True)
+
+            itS   = self.p_it(src_t_feat)
+            itS_a = self.p_it(src_t_feat_a)
+            ifS   = self.p_if(src_f_feat)
+            ifS_a = self.p_if(src_f_feat_a)
+
+            src_inst_loss = self.vic(itS, itS_a) + self.vic(ifS, ifS_a)
+        else:
+            src_inst_loss = torch.tensor(0.0, device=self.device)
+
+
+        # ===================== Source Shared (InfoNCE) =====================
+        sh_s_w = getattr(self.args, "sh_s", 0.0)
+        if sh_s_w > 0:
+            stS = self.p_st(src_t_feat)
+            sfS = self.p_sf(src_f_feat)
+            src_sh_loss = self.ntx(stS, sfS)
+        else:
+            src_sh_loss = torch.tensor(0.0, device=self.device)
+
+
     
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
@@ -185,8 +277,6 @@ class ACON(Algorithm):
         ).sum(dim=1)
         
         align_t_tf_loss = self.uncertainty_weight * (weight * kl_trg).mean()
-        
-            
 
     
         entropy_trg_t = self.criterion_cond(trg_t_pred)
@@ -196,23 +286,15 @@ class ACON(Algorithm):
             + self.args.domain_trade_off * domain_loss \
             + self.args.entropy_trade_off * (entropy_trg_t + entropy_trg_f) \
             + self.args.align_t_trade_off * align_t_tf_loss \
-            + self.args.align_s_trade_off * align_s_tf_loss
+            + self.args.align_s_trade_off * align_s_tf_loss \
+            + getattr(self.args, "ins_t", 1.0) * trg_inst_loss \
+            + getattr(self.args, "sh_t", 1.0) * trg_sh_loss \
+            + getattr(self.args, "ins_s", 0.0) * src_inst_loss \
+            + getattr(self.args, "sh_s", 0.0) * src_sh_loss
     
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-    
-
-            
-        self.idea_logger.log(
-                epoch=self.current_epoch,
-                trg_t_pred=trg_t_pred,
-                kl_src=kl_src,
-                kl_trg=kl_trg,
-                uncert_trg_t=uncert_trg_t if 'uncert_trg_t' in locals() else None,
-                align_t_tf_loss=align_t_tf_loss,
-                align_s_tf_loss=align_s_tf_loss
-        )
 
         return {
             'Src_t_cls_loss': src_t_cls_loss.item(),
@@ -222,10 +304,12 @@ class ACON(Algorithm):
             'align target tf loss': align_t_tf_loss.item(),
             'cond_ent_loss_t': entropy_trg_t.item(),
             'cond_ent_loss_f': entropy_trg_f.item(),
-            'domain acc': domain_acc.item()
+            'domain acc': domain_acc.item(),
+            'trg_inst_loss': trg_inst_loss.item(),
+            'trg_sh_loss': trg_sh_loss.item(),
+            'src_inst_loss': src_inst_loss.item(),
+            'src_sh_loss': src_sh_loss.item(),
         }
-
-
     
 
     # Uncertainty-Aware Mutual Learning
