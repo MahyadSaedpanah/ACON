@@ -20,7 +20,7 @@ parser.add_argument('--run_description', default='ACON', type=str, help='name of
 parser.add_argument('--da_method', default='ACON', type=str)
 
 # ========= Select the DATASET ==============
-parser.add_argument('--data_path', default='/home/mahyad/projects/ACON/data', type=str, help='Path containing dataset')
+parser.add_argument('--data_path', default='/content/ACON/data', type=str, help='Path containing dataset')
 parser.add_argument('--dataset', default='UCIHAR',type=str)
 
 # ========= Select the BACKBONE ==============
@@ -51,8 +51,7 @@ parser.add_argument('--domain_trade_off', type=float,default=1.0)
 parser.add_argument('--align_s_trade_off', type=float,default=1.0)
 parser.add_argument('--align_t_trade_off', type=float,default=1.0)
 parser.add_argument('--cls_trade_off', type=float,default=1.0)
-parser.add_argument('--uncertainty_weight', type=float, default=1.0)
-parser.add_argument('--mc_passes', type=float, default=10)
+parser.add_argument('--mc_passes', type=int, default=10)
 
 parser.add_argument('--log_dir', type=str, default='.', help='Directory to save idea logs')
 

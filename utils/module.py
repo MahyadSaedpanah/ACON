@@ -56,19 +56,6 @@ class CNN(nn.Module):
         return x_flat
 
 
-
-
-
-# class TemporalClassifierHead(nn.Module):
-
-#     def __init__(self, in_dim, num_classes, bias=True):
-#         super(TemporalClassifierHead, self).__init__()
-#         self.head = nn.Linear(in_dim, num_classes, bias=bias)
-
-#     def forward(self, x):
-#         predictions = self.head(x)
-#         return predictions
-    
 class TemporalClassifierHead(nn.Module):
     def __init__(self, in_dim, num_classes, bias=True, dropout_p=0.5):
         super(TemporalClassifierHead, self).__init__()
@@ -76,26 +63,28 @@ class TemporalClassifierHead(nn.Module):
         self.head = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x):
-        x = self.dropout(x)  # Enables stochasticity
+        x = self.dropout(x)
         return self.head(x)
 
 
 class FrequencyClassifierHead(nn.Module):
 
-    def __init__(self, in_dim, num_classes, bias=True):
+    def __init__(self, in_dim, num_classes, bias=True, dropout_p=0.5):
         super(FrequencyClassifierHead, self).__init__()
         self.linear1 = nn.Linear(in_dim, in_dim)
+        self.dropout = nn.Dropout(p=dropout_p)
         self.linear2 = nn.Linear(in_dim, num_classes, bias=bias)
 
     def forward(self, x, get_feat=False):
         x = self.linear1(x)
+        x = self.dropout(x)
         predictions = self.linear2(x)
+
         if get_feat:
             return predictions, x
         else:
             return predictions
-    
-    
+
 
 class Discriminator(nn.Module):
 
