@@ -13,4 +13,10 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --align_s_trade_off 1 \
  --kl_t 4.0 \
  --mc_passes 10 \
+ --facg \
+ --facg_warmup 5 \
+ --ins_t 0.005 \
+ --sh_t 0.005 \
+ --ins_s 0.0 \
+ --sh_s 0.0 \
  --device cuda \
