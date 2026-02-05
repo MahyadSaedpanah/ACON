@@ -106,8 +106,7 @@ class ACON(Algorithm):
         self.kl = nn.KLDivLoss(reduction=args.kl_reduction)
 
         self.mc_passes = getattr(args, "mc_passes", 10)
-        self.uncertainty_weight = getattr(args, "uncertainty_weight", 1.0)
-
+        
     # ------------------ Utility functions ------------------
     def period_data(self, x, period):
         B, N = x.size(0), x.size(1)
@@ -247,31 +246,7 @@ class ACON(Algorithm):
         else:
             trg_sh_loss = torch.tensor(0.0, device=self.device)
 
-        # ===================== Source Instance & Shared =====================
-        ins_s_w = getattr(self.args, "ins_s", 0.0)
-        if ins_s_w > 0:
-            src_xa = aug_t(src_x, self.args)
-            src_t_feat_a = self.t_feature_extractor(src_xa)
-            src_f_feat_a0 = self.f_feature_extractor(self.period_data(src_xa, self.period))
-            src_a_cls_a, _ = self.get_amplitude(src_f_feat_a0)
-            src_a_cls_a = aug_f(src_a_cls_a, self.args)
-            _, src_f_feat_a = self.f_classifier(src_a_cls_a, True)
-            itS   = self.p_it(src_t_feat)
-            itS_a = self.p_it(src_t_feat_a)
-            ifS   = self.p_if(src_f_feat)
-            ifS_a = self.p_if(src_f_feat_a)
-            src_inst_loss = self.vic(itS, itS_a) + self.vic(ifS, ifS_a)
-        else:
-            src_inst_loss = torch.tensor(0.0, device=self.device)
-
-        sh_s_w = getattr(self.args, "sh_s", 0.0)
-        if sh_s_w > 0:
-            stS = self.p_st(src_t_feat)
-            sfS = self.p_sf(src_f_feat)
-            src_sh_loss = self.ntx(stS, sfS)
-        else:
-            src_sh_loss = torch.tensor(0.0, device=self.device)
-
+        
         # ===================== Graph & Domain Loss =====================
         h_src = self.graph_module(src_t_feat, src_f_feat)
         h_trg = self.graph_module(trg_t_feat, trg_f_feat)
@@ -315,9 +290,7 @@ class ACON(Algorithm):
             + self.args.align_t_trade_off * align_t_tf_loss \
             + self.args.align_s_trade_off * align_s_tf_loss \
             + getattr(self.args, "ins_t", 1.0) * trg_inst_loss \
-            + getattr(self.args, "sh_t", 1.0) * trg_sh_loss \
-            + getattr(self.args, "ins_s", 0.0) * src_inst_loss \
-            + getattr(self.args, "sh_s", 0.0) * src_sh_loss
+            + getattr(self.args, "sh_t", 1.0) * trg_sh_loss
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -334,8 +307,6 @@ class ACON(Algorithm):
             'domain acc': domain_acc.item(),
             'trg_inst_loss': trg_inst_loss.item(),
             'trg_sh_loss': trg_sh_loss.item(),
-            'src_inst_loss': src_inst_loss.item(),
-            'src_sh_loss': src_sh_loss.item(),
             'facg_w_sh_mean': out_w_sh,
             'facg_w_ins_mean': out_w_ins,
         }

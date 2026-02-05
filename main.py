@@ -60,8 +60,6 @@ parser.add_argument('--proj_dim', type=int, default=128, help='projection dim fo
 # weights
 parser.add_argument('--ins_t', type=float, default=1.0, help='target instance VICReg weight')
 parser.add_argument('--sh_t', type=float, default=1.0, help='target shared InfoNCE weight')
-parser.add_argument('--ins_s', type=float, default=0.0, help='source instance weight (default off)')
-parser.add_argument('--sh_s', type=float, default=0.0, help='source shared weight (default off)')
 
 # VICReg hyperparams
 parser.add_argument('--vic_sim', type=float, default=25.0)
@@ -85,7 +83,6 @@ parser.add_argument('--f_mask_w', type=int, default=8)
 parser.add_argument('--facg', action='store_true', help='enable factorization-aware gating')
 parser.add_argument('--facg_warmup', type=int, default=5, help='epochs with w_sh=1 before gating starts')
 parser.add_argument('--facg_eps', type=float, default=1e-8, help='numerical stability epsilon')
-
 
 
 # ========= Debug Mode ===============

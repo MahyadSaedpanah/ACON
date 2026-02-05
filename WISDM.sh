@@ -17,6 +17,4 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
  --facg_warmup 5 \
  --ins_t 0.005 \
  --sh_t 0.005 \
- --ins_s 0.0 \
- --sh_s 0.0 \
  --device cuda \
