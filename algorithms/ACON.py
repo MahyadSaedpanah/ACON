@@ -274,7 +274,7 @@ class ACON(Algorithm):
 
         # ===================== Target dynamic mutual learning =====================
         align_t_dyn_loss = self.dynamic_mutual_loss(trg_t_pred, trg_f_pred, trg_t_feat, trg_a_cls)
-        align_t_tf_loss = self.args.align_t_trade_off * align_t_dyn_loss
+        align_t_tf_loss = align_t_dyn_loss
 
         # ===================== Source KL alignment (fixed) =====================
         align_s_tf_loss = F.kl_div(
