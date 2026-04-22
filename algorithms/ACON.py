@@ -190,7 +190,7 @@ class ACON(Algorithm):
             t_feat=trg_t_feat,
             a_cls=trg_a_cls
         )
-        align_t_tf_loss = self.args.align_t_trade_off * align_t_dyn_loss
+        align_t_tf_loss = align_t_dyn_loss
 
 
         # ---------- Source: FIXED teacher (REVERT to ACON) ----------
